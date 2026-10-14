@@ -88,7 +88,7 @@ def ts_report(path):
     data = open(path, "rb").read()
     if len(data) < 188 * 10:
         return "only %d bytes -- nothing streamed" % len(data)
-    start = data.find(0x47)
+    start = data.find(b"\x47")
     total = aligned = 0
     cc = {}
     errors = 0
