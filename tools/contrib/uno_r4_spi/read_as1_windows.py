@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Read W25Q16JVSIQ via UNO R4 Minima, Windows + pyserial. Read only.
+"""Read a W25Q16JV with JEDEC EF 70 15 via UNO R4 Minima and pyserial.
 
 Usage: py -m pip install pyserial
        py read_as1_windows.py COM5
@@ -9,6 +9,8 @@ import hashlib
 import pathlib
 import sys
 import time
+
+from progress import Progress
 
 try:
     import serial
@@ -30,11 +32,12 @@ def read_exact(port, n):
     return bytes(data)
 
 
-def read_full(port, name):
+def read_full(port, name, pass_number):
     outfile = pathlib.Path(name)
     if outfile.exists():
         raise FileExistsError(f"既存ファイルを上書きしません: {outfile}")
     sha = hashlib.sha256()
+    progress = Progress(f"ROM読み出し {pass_number}/2", SIZE)
     try:
         with outfile.open("xb") as f:
             for address in range(0, SIZE, BLOCK):
@@ -42,8 +45,7 @@ def read_full(port, name):
                 block = read_exact(port, BLOCK)
                 f.write(block)
                 sha.update(block)
-                if (address + BLOCK) % (64 * 1024) == 0:
-                    print(f"  {name}: {(address + BLOCK)//1024}/{SIZE//1024} KiB", flush=True)
+                progress.update(address + BLOCK)
     except Exception:
         print(f"読み出し失敗。{outfile} は不完全な可能性があります。", file=sys.stderr)
         raise
@@ -57,7 +59,14 @@ def main():
     parser.add_argument("--probe", action="store_true", help="試験読み出しだけ実行します")
     args = parser.parse_args()
     com = args.port
+    filenames = ("as1-original-1.bin", "as1-original-2.bin")
+    if not args.probe:
+        for filename in filenames:
+            if pathlib.Path(filename).exists():
+                raise FileExistsError(f"既存ファイルを上書きしません: {filename}")
     print(f"接続: {com}")
+    if not args.probe:
+        print("ROMを2回読み出します。完了後に全容量のSHA-256を比較します。", flush=True)
     with serial.Serial(com, baudrate=115200, timeout=30, write_timeout=30) as port:
         time.sleep(2.0)
         port.reset_input_buffer()
@@ -97,8 +106,8 @@ def main():
         if args.probe:
             return
         hashes = []
-        for filename in ("as1-original-1.bin", "as1-original-2.bin"):
-            hashes.append(read_full(port, filename))
+        for pass_number, filename in enumerate(filenames, start=1):
+            hashes.append(read_full(port, filename, pass_number))
         if hashes[0] != hashes[1]:
             raise RuntimeError("2回の読み出し結果が一致しません。書き込みは絶対に行わないでください。")
         # Identical hashes are a strong equality check; ensure neither all-00 nor all-FF.
