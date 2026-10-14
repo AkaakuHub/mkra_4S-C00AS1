@@ -573,6 +573,12 @@ impl Tap {
                 live.video_readers, live.audio_readers
             )));
         }
+        let level = drv.sbuf_status_raw(live.video_es)?[5];
+        if level >= cfg.es_level_abort {
+            return Err(io::Error::other(format!(
+                "the live video ES is already backed up to level {level:#x}"
+            )));
+        }
         eprintln!(
             "remux4k: MMT_DEMUX={:#x} pipeline={:#x} video_es={:#x} (readers {}) audio_es={:#x} (readers {})",
             live.mmt_demux, live.pipeline, live.video_es, live.video_readers,
@@ -626,10 +632,7 @@ impl Tap {
         self.conn_video = d.connect_input(self.device, self.live.video_es)?;
         self.conn_audio = d.connect_input(self.device, self.live.audio_es)?;
 
-        let ats_base = d.pipeline_get_time(self.live.pipeline).unwrap_or_else(|e| {
-            eprintln!("mkra: warning: pipeline get_time: {e}; using 0 as the ATS base");
-            0
-        });
+        let ats_base = d.pipeline_get_time(self.live.pipeline)?;
         let program = u32::from(self.cfg.service_id);
         d.remux_add_program(self.device, program, PCR_PID, PMT_PID, PCR_INTERVAL, ats_base)?;
         self.program_added = true;

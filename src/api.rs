@@ -700,13 +700,13 @@ fn stream(state: &AppState, req: &Request, out: &mut TcpStream, channel_key: &st
     // of the process. A silent tuner has to fail like a busy one, not like a
     // working one.
     let mut buf = vec![0u8; 64 * 1024];
-    let mut first = 0usize;
     let deadline = Instant::now() + FIRST_BYTE_TIMEOUT;
-    while first == 0 {
-        if sub.is_closed() {
-            break;
+    let first = loop {
+        let n = sub.read(&mut buf, Duration::from_millis(200));
+        if n > 0 {
+            break n;
         }
-        if Instant::now() >= deadline {
+        if sub.is_closed() || Instant::now() >= deadline {
             eprintln!(
                 "mkra: no data from the TS backend for {channel_key} within {:?}; \
                  releasing the tuner",
@@ -716,14 +716,13 @@ fn stream(state: &AppState, req: &Request, out: &mut TcpStream, channel_key: &st
             let _ = respond_error(out, 503, "tuner produced no data", false);
             return;
         }
-        first = sub.read(&mut buf, Duration::from_millis(200));
-    }
+    };
 
     if respond_stream_headers(out, &[("X-Mirakurun-Tuner-User-ID", user_id)]).is_err() {
         state.broker.unsubscribe(&session, &sub);
         return;
     }
-    if first > 0 && out.write_all(&buf[..first]).is_err() {
+    if out.write_all(&buf[..first]).is_err() {
         state.broker.unsubscribe(&session, &sub);
         return;
     }

@@ -506,7 +506,6 @@ fn pump(
 ) {
     let mut scratch: Vec<u8> = Vec::with_capacity(256 * 1024);
     let mut idle_since: Option<Instant> = None;
-    let mut consecutive_errors = 0u32;
 
     loop {
         if session.stop.load(Ordering::Relaxed) {
@@ -528,10 +527,8 @@ fn pump(
             Ok(0) => {
                 // Nothing available. `read_into` already blocked or slept, so
                 // spinning here is bounded by the source's own timeout.
-                consecutive_errors = 0;
             }
             Ok(n) => {
-                consecutive_errors = 0;
                 session.bytes_in.fetch_add(n as u64, Ordering::Relaxed);
                 for s in &subs {
                     if !s.is_closed() {
@@ -541,17 +538,11 @@ fn pump(
             }
             Err(e) => {
                 session.errors.fetch_add(1, Ordering::Relaxed);
-                consecutive_errors += 1;
                 eprintln!(
-                    "mkra: read error on {} ({consecutive_errors}): {e}",
+                    "mkra: read error on {}: {e}",
                     session.channel_key
                 );
-                // A handful of transient errors is tolerable; a persistent one
-                // means the buffer went away and the session cannot recover.
-                if consecutive_errors >= 20 || e.kind() == io::ErrorKind::UnexpectedEof {
-                    break;
-                }
-                std::thread::sleep(Duration::from_millis(50));
+                break;
             }
         }
     }

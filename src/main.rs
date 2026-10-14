@@ -1260,24 +1260,8 @@ fn cmd_serve(opts: &Options) -> i32 {
                     service_id: live.service_id,
                     ..base
                 };
-                match remux4k::Tap::open(Arc::clone(&drv), cfg) {
-                    Ok(t) => Ok(Box::new(t) as Box<dyn TsSource>),
-                    Err(first) => {
-                        // One retry: the product can still be settling right
-                        // after a change, and a second later the same sequence
-                        // succeeds.
-                        eprintln!("mkra: tap failed ({first}); retrying once");
-                        std::thread::sleep(Duration::from_millis(1000));
-                        let live = si::live_service(si::ADSB_SI_DIR).unwrap_or(live);
-                        let cfg = remux4k::TapConfig {
-                            stream_id: live.tlv_stream_id,
-                            service_id: live.service_id,
-                            ..base
-                        };
-                        remux4k::Tap::open(Arc::clone(&drv), cfg)
-                            .map(|t| Box::new(t) as Box<dyn TsSource>)
-                    }
-                }
+                remux4k::Tap::open(Arc::clone(&drv), cfg)
+                    .map(|t| Box::new(t) as Box<dyn TsSource>)
             }),
             "BS4K REMUX tap (live MMT -> MPEG-TS)".to_string(),
         )
