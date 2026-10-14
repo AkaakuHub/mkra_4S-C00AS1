@@ -4,11 +4,13 @@ constexpr uint8_t AS1_ROM_CS_PIN = 8;
 constexpr uint8_t AS1_ROM_MOSI_PIN = 9;
 constexpr uint8_t AS1_ROM_CLK_PIN = 7;
 constexpr uint8_t AS1_ROM_MISO_ADC_PIN = A0;
+constexpr uint8_t AS1_ROM_CLK_ADC_PIN = A1;
 constexpr uint16_t ADC_HIGH_THRESHOLD = 410; // 10-bit ADC: ~2.0V at 5V reference
 constexpr uint32_t FLASH_SIZE = 2UL * 1024UL * 1024UL;
 constexpr uint32_t ENV_START = 0x1FF000UL;
 
 static uint8_t chunk[256];
+static uint16_t clockLevels[256 * 8 * 2];
 
 static inline void pullLow(uint8_t pin) {
   digitalWrite(pin, LOW);
@@ -23,15 +25,17 @@ static void configureOpenDrain(uint8_t pin, bool released) {
     (released ? IOPORT_CFG_PORT_OUTPUT_HIGH : IOPORT_CFG_PORT_OUTPUT_LOW));
 }
 
-static uint8_t bitbangTransfer(uint8_t transmit) {
+static uint8_t bitbangTransfer(uint8_t transmit, uint16_t* levels = nullptr) {
   uint8_t received = 0;
   for (int bit = 7; bit >= 0; --bit) {
     if (transmit & (1U << bit)) releaseTo33(AS1_ROM_MOSI_PIN);
     else pullLow(AS1_ROM_MOSI_PIN);
     delayMicroseconds(4);
+    if (levels != nullptr) levels[(7 - bit) * 2] = analogRead(AS1_ROM_CLK_ADC_PIN);
 
     releaseTo33(AS1_ROM_CLK_PIN); // Rising edge: ROM samples MOSI
     delayMicroseconds(8);
+    if (levels != nullptr) levels[(7 - bit) * 2 + 1] = analogRead(AS1_ROM_CLK_ADC_PIN);
 
     uint16_t level = analogRead(AS1_ROM_MISO_ADC_PIN);
     received = (uint8_t)((received << 1) | (level >= ADC_HIGH_THRESHOLD ? 1 : 0));
@@ -136,16 +140,28 @@ static void programEnvironment(uint32_t address) {
   Serial.write((uint8_t)(ok ? 'K' : 'X'));
 }
 
-static void read256(uint32_t addr) {
+static void read256(uint32_t addr, bool measureClock) {
   if (addr > FLASH_SIZE - sizeof(chunk)) return; // PC validates addresses.
   selectFlash();
   bitbangTransfer(0x03); // standard read (no dummy cycles)
   sendAddress(addr);
   for (unsigned i = 0; i < sizeof(chunk); ++i) {
-    chunk[i] = bitbangTransfer(0x00);
+    chunk[i] = bitbangTransfer(0x00, measureClock ? &clockLevels[i * 16] : nullptr);
   }
   deselectFlash();
   Serial.write(chunk, sizeof(chunk));
+  if (measureClock) Serial.write((uint8_t*)clockLevels, sizeof(clockLevels));
+}
+
+static void measureIdleClock() {
+  deselectFlash();
+  releaseTo33(AS1_ROM_CLK_PIN);
+  delayMicroseconds(100);
+  for (unsigned i = 0; i < sizeof(clockLevels) / sizeof(clockLevels[0]); ++i) {
+    clockLevels[i] = analogRead(AS1_ROM_CLK_ADC_PIN);
+  }
+  pullLow(AS1_ROM_CLK_PIN);
+  Serial.write((uint8_t*)clockLevels, sizeof(clockLevels));
 }
 
 void setup() {
@@ -153,6 +169,7 @@ void setup() {
   configureOpenDrain(AS1_ROM_MOSI_PIN, true);
   configureOpenDrain(AS1_ROM_CLK_PIN, false);
   pinMode(AS1_ROM_MISO_ADC_PIN, INPUT);
+  pinMode(AS1_ROM_CLK_ADC_PIN, INPUT);
   analogReadResolution(10);
   Serial.begin(115200);
   Serial.setTimeout(3000);
@@ -163,16 +180,18 @@ void loop() {
   int cmd = Serial.read();
   if (cmd == 'I') {
     readId();
+  } else if (cmd == 'B') {
+    measureIdleClock();
   } else if (cmd == 'S') {
     uint8_t status[] = {readRegister(0x05), readRegister(0x35), readRegister(0x15)};
     Serial.write(status, sizeof(status));
-  } else if (cmd == 'R' || cmd == 'E' || cmd == 'P') {
+  } else if (cmd == 'R' || cmd == 'C' || cmd == 'E' || cmd == 'P') {
     uint8_t address[3];
     if (Serial.readBytes(address, 3) != 3) return;
     uint32_t offset = (uint32_t)address[0] |
                       ((uint32_t)address[1] << 8) |
                       ((uint32_t)address[2] << 16);
-    if (cmd == 'R') read256(offset);
+    if (cmd == 'R' || cmd == 'C') read256(offset, cmd == 'C');
     else if (cmd == 'E') eraseEnvironment(offset);
     else programEnvironment(offset);
   }
