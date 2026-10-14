@@ -9,7 +9,6 @@ constexpr uint32_t FLASH_SIZE = 2UL * 1024UL * 1024UL;
 constexpr uint32_t ENV_START = 0x1FF000UL;
 
 static uint8_t chunk[256];
-static uint16_t adcSamples[256 * 8];
 
 static inline void pullLow(uint8_t pin) {
   digitalWrite(pin, LOW);
@@ -24,7 +23,7 @@ static void configureOpenDrain(uint8_t pin, bool released) {
     (released ? IOPORT_CFG_PORT_OUTPUT_HIGH : IOPORT_CFG_PORT_OUTPUT_LOW));
 }
 
-static uint8_t bitbangTransfer(uint8_t transmit, uint16_t* samples = nullptr) {
+static uint8_t bitbangTransfer(uint8_t transmit) {
   uint8_t received = 0;
   for (int bit = 7; bit >= 0; --bit) {
     if (transmit & (1U << bit)) releaseTo33(AS1_ROM_MOSI_PIN);
@@ -35,7 +34,6 @@ static uint8_t bitbangTransfer(uint8_t transmit, uint16_t* samples = nullptr) {
     delayMicroseconds(8);
 
     uint16_t level = analogRead(AS1_ROM_MISO_ADC_PIN);
-    if (samples != nullptr) samples[7 - bit] = level;
     received = (uint8_t)((received << 1) | (level >= ADC_HIGH_THRESHOLD ? 1 : 0));
 
     pullLow(AS1_ROM_CLK_PIN); // Falling edge
@@ -84,15 +82,18 @@ static bool waitReady(uint32_t timeoutMs) {
   return true;
 }
 
-static bool enableWrite() {
-  if (!waitReady(1000)) return false;
+static bool jedecMatches() {
   selectFlash();
   bitbangTransfer(0x9F);
   uint8_t manufacturer = bitbangTransfer(0);
   uint8_t type = bitbangTransfer(0);
   uint8_t capacity = bitbangTransfer(0);
   deselectFlash();
-  if (manufacturer != 0xEF || type != 0x70 || capacity != 0x15) return false;
+  return manufacturer == 0xEF && type == 0x70 && capacity == 0x15;
+}
+
+static bool enableWrite() {
+  if (!waitReady(1000) || !jedecMatches()) return false;
   selectFlash();
   bitbangTransfer(0x06);
   deselectFlash();
@@ -135,20 +136,16 @@ static void programEnvironment(uint32_t address) {
   Serial.write((uint8_t)(ok ? 'K' : 'X'));
 }
 
-static void read256(uint32_t addr, bool diagnostic) {
+static void read256(uint32_t addr) {
   if (addr > FLASH_SIZE - sizeof(chunk)) return; // PC validates addresses.
   selectFlash();
   bitbangTransfer(0x03); // standard read (no dummy cycles)
   sendAddress(addr);
   for (unsigned i = 0; i < sizeof(chunk); ++i) {
-    chunk[i] = bitbangTransfer(0x00, diagnostic ? &adcSamples[i * 8] : nullptr);
+    chunk[i] = bitbangTransfer(0x00);
   }
   deselectFlash();
-  if (diagnostic) {
-    Serial.write((uint8_t*)adcSamples, sizeof(adcSamples));
-  } else {
-    Serial.write(chunk, sizeof(chunk));
-  }
+  Serial.write(chunk, sizeof(chunk));
 }
 
 void setup() {
@@ -169,13 +166,13 @@ void loop() {
   } else if (cmd == 'S') {
     uint8_t status[] = {readRegister(0x05), readRegister(0x35), readRegister(0x15)};
     Serial.write(status, sizeof(status));
-  } else if (cmd == 'R' || cmd == 'A' || cmd == 'E' || cmd == 'P') {
+  } else if (cmd == 'R' || cmd == 'E' || cmd == 'P') {
     uint8_t address[3];
     if (Serial.readBytes(address, 3) != 3) return;
     uint32_t offset = (uint32_t)address[0] |
                       ((uint32_t)address[1] << 8) |
                       ((uint32_t)address[2] << 16);
-    if (cmd == 'R' || cmd == 'A') read256(offset, cmd == 'A');
+    if (cmd == 'R') read256(offset);
     else if (cmd == 'E') eraseEnvironment(offset);
     else programEnvironment(offset);
   }
