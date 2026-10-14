@@ -5,6 +5,7 @@ Usage: py -m pip install pyserial
        py read_as1_windows.py COM5
 """
 import argparse
+import binascii
 import hashlib
 import pathlib
 import sys
@@ -20,6 +21,7 @@ except ImportError:
 SIZE = 2 * 1024 * 1024
 BLOCK = 256
 EXPECTED_JEDEC = bytes.fromhex("EF7015")
+ENV_START = 0x1FF000
 
 
 def read_exact(port, n):
@@ -53,6 +55,14 @@ def read_full(port, name, pass_number):
     return sha.digest()
 
 
+def read_environment(port):
+    result = bytearray()
+    for address in range(ENV_START, SIZE, BLOCK):
+        port.write(b"R" + address.to_bytes(3, "little"))
+        result.extend(read_exact(port, BLOCK))
+    return bytes(result)
+
+
 def main():
     parser = argparse.ArgumentParser(description="SPI ROMを2回読み出して比較します。")
     parser.add_argument("port", help="COM3などのシリアルポート")
@@ -77,6 +87,9 @@ def main():
             print(f"JEDEC ID ({attempt}/5): {ident.hex(' ').upper()}", flush=True)
             if ident != EXPECTED_JEDEC:
                 raise RuntimeError("JEDEC ID が EF 70 15 と一致しません。読み出しを中止します。")
+        port.write(b"S")
+        status = read_exact(port, 3)
+        print(f"設定値 SR1・SR2・SR3: {status.hex(' ').upper()}", flush=True)
         # Check a few read locations twice, to catch unstable data-path signals.
         for address in (0x000000, 0x010000, 0x1FF000):
             samples = []
@@ -103,6 +116,16 @@ def main():
                     )
                 raise RuntimeError(f"読み出しが不安定です。アドレス {address:06X} の2回の結果が異なります。")
             print(f"試験読み出し OK: 0x{address:06X}", flush=True)
+        environment = read_environment(port)
+        if environment != read_environment(port):
+            raise RuntimeError("環境データ4KiBの2回の読み出しが一致しません。")
+        stored = int.from_bytes(environment[:4], "little")
+        calculated = binascii.crc32(environment[4:]) & 0xFFFFFFFF
+        if stored != calculated:
+            raise RuntimeError(
+                f"環境CRCが一致しません。保存値={stored:08X} 計算値={calculated:08X}"
+            )
+        print("環境データ4KiB: 2回一致・CRC一致", flush=True)
         if args.probe:
             return
         hashes = []
