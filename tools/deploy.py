@@ -18,6 +18,7 @@ Requires: a root telnet on port 2323 (see docs/SETUP.md) and the box switched
 on -- green LED, not standby.
 """
 import argparse
+import hashlib
 import json
 import os
 import subprocess
@@ -115,19 +116,31 @@ def pull(t, host, remote_path, local_path, port):
     if size == 0:
         print("  %s is empty on the device" % remote_path)
         return 0
-    t.run("%s serve --port %d --file %s --raw-stream --file-bitrate 0 "
-          "> %s/pull.log 2>&1 &" % (REMOTE, port, remote_path, MICROTEST_DIR))
-    time.sleep(2)
-    with urllib.request.urlopen("http://%s:%d/api/channels" % (host, port), timeout=10) as r:
-        chans = json.load(r)
-    url = ("http://%s:%d/api/channels/%s/%s/stream"
-           % (host, port, chans[0]["type"], chans[0]["channel"]))
-    limit = max(30, size // 200_000 + 20)
-    with open(local_path, "wb") as fh:
-        subprocess.run(["curl", "-sN", "--max-time", str(limit), url],
-                       stdout=fh, stderr=subprocess.DEVNULL)
-    got = os.path.getsize(local_path)
-    print("  pulled %d of %d bytes -> %s" % (got, size, local_path))
+    pid = t.run("%s serve --port %d --file %s --raw-stream --file-bitrate 0 "
+                "--ring %d > %s/pull.log 2>&1 & echo $!"
+                % (REMOTE, port, remote_path, size, MICROTEST_DIR)).strip()
+    try:
+        time.sleep(2)
+        with urllib.request.urlopen("http://%s:%d/api/channels" % (host, port), timeout=10) as r:
+            chans = json.load(r)
+        url = ("http://%s:%d/api/channels/%s/%s/stream"
+               % (host, port, chans[0]["type"], chans[0]["channel"]))
+        limit = max(30, size // 200_000 + 20)
+        with open(local_path, "wb") as fh:
+            subprocess.run(["curl", "-fsSN", "--max-time", str(limit), url],
+                           stdout=fh, check=True)
+        got = os.path.getsize(local_path)
+        print("  pulled %d of %d bytes -> %s" % (got, size, local_path))
+        if got != size:
+            raise RuntimeError("file transfer is incomplete: %d of %d bytes" % (got, size))
+        expected = t.run("md5sum %s" % remote_path).split()[0]
+        with open(local_path, "rb") as fh:
+            actual = hashlib.file_digest(fh, "md5").hexdigest()
+        if actual != expected:
+            raise RuntimeError("transferred file does not match the device's MD5")
+        print("  md5 %s verified after transfer" % actual)
+    finally:
+        t.stop_microtest(pid)
     return got
 
 
