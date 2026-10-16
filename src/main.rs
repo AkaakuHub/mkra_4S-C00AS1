@@ -547,6 +547,10 @@ fn cmd_sc1501a_snapshot(opts: &Options) -> i32 {
     match snapshot::procmem::find_pid("tuner") {
         Ok(pid) => {
             println!("tuner.pid={pid}");
+            if let Err(e) = snapshot::verify_tuner_binary(pid) {
+                eprintln!("mkra: refusing tuner memory inspection: {e}");
+                return 1;
+            }
             match snapshot::procmem::maps(pid) {
                 Ok(maps) => {
                     for addr in [snapshot::RECOMMEND_FLAGS, snapshot::PSEQ_FLAGS, snapshot::CONTEXT_BASE] {
