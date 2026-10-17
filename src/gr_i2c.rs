@@ -605,7 +605,7 @@ mod arm_linux {
         }
     }
 
-    pub fn with_isdbs_full_route<F>(capture: F) -> io::Result<()>
+    pub fn with_isdbs_serial_route<F>(capture: F) -> io::Result<()>
     where
         F: FnOnce() -> io::Result<()>,
     {
@@ -623,11 +623,6 @@ mod arm_linux {
                 (0x16, 0x07, 0x00, 0x60),
                 (0x16, 0xcf, 0xff, 0x95),
                 (0x12, 0x73, 0x00, 0x80),
-                (0x17, 0x73, 0x03, 0x24),
-                (0x17, 0x75, 0x01, 0x00),
-                (0x17, 0x7b, 0x67, 0x64),
-                (0x17, 0x7d, 0x81, 0x01),
-                (0x10, 0x13, 0x00, 0x04),
                 (0x10, 0x16, 0x00, 0x21),
                 (0x10, 0xcc, 0xc0, 0x80),
             ];
@@ -656,7 +651,7 @@ mod arm_linux {
                         )));
                     }
                 }
-                eprintln!("isdbs full route active; capturing with all 13 register writes applied");
+                eprintln!("isdbs serial route active; capturing with all 8 register writes applied");
                 capture()
             })();
             let mut restore_error = None;
@@ -677,7 +672,7 @@ mod arm_linux {
                 return Err(error);
             }
             restored?;
-            eprintln!("isdbs full route restored and verified");
+            eprintln!("isdbs serial route restored and verified");
             applied
         })();
         let release = guard.release();
@@ -995,17 +990,17 @@ pub use arm_linux::{
     make_isdbs_ts_output_exclusive, quiesce_ts_output, read_isdbs_status, read_output_regs,
     select_tlv_output_exclusive, set_tsout_framing, set_tsout_interface, snapshot_watchlist,
     standby_isdbt, tune, probe_hiz, probe_doset,
-    with_isdbs_full_route,
+    with_isdbs_serial_route,
 };
 
 #[cfg(not(all(target_os = "linux", target_arch = "arm")))]
-pub fn with_isdbs_full_route<F>(_capture: F) -> std::io::Result<()>
+pub fn with_isdbs_serial_route<F>(_capture: F) -> std::io::Result<()>
 where
     F: FnOnce() -> std::io::Result<()>,
 {
     Err(std::io::Error::new(
         std::io::ErrorKind::Unsupported,
-        "SC1501A full-route probe is available only in the ARM device build",
+        "SC1501A serial-route probe is available only in the ARM device build",
     ))
 }
 
