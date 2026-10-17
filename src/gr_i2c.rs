@@ -645,6 +645,17 @@ mod arm_linux {
                     bus.write(addr, reg, &[value])?;
                     changed += 1;
                 }
+                for &(addr, reg, _, value) in &changes {
+                    if addr == 0x16 && matches!(reg, 0x0a | 0x0b | 0xcf) {
+                        continue;
+                    }
+                    let actual = bus.read(addr, reg, 1)?[0];
+                    if actual != value {
+                        return Err(io::Error::other(format!(
+                            "active readback mismatch at {addr:02x}:{reg:02x}: {actual:02x}"
+                        )));
+                    }
+                }
                 eprintln!("isdbs full route active; capturing with all 13 register writes applied");
                 capture()
             })();
