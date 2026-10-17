@@ -24,6 +24,15 @@ pub fn print() -> io::Result<()> {
         return Err(io::Error::other("unexpected firmware queue free-list head"));
     }
     let free_next = kmem.u32(free_head)?;
+    let dispatch_flags = kmem.read(ctx + 0x48b90, 16 * 4)?;
+    let pending_dispatch: Vec<_> = dispatch_flags
+        .chunks_exact(4)
+        .enumerate()
+        .filter_map(|(core, bytes)| {
+            let flag = u32::from_le_bytes(bytes.try_into().ok()?);
+            (flag != 0).then_some((core, flag))
+        })
+        .collect();
     println!("XCode6 firmware status (read-only):");
     println!("  ctx={ctx:#010x} mmr_base={mmr_base:#010x} sg_av={sg_av:#010x}");
     println!("  get_fw_state flag={state} stale_count={stale_count}");
@@ -32,6 +41,7 @@ pub fn print() -> io::Result<()> {
     println!("  buffer_queue_capacity={buffer_queue_capacity}");
     println!("  buffer_queue_free_head={free_head:#010x} next={free_next:#010x}");
     println!("  buffer_queue_free_list_empty={}", free_next == free_head);
+    println!("  ipc_pending_dispatch={pending_dispatch:?}");
     if mmr_base != 0xffee_0000 || mmr_phys != mmr_base || mmr_len != 0x20000 {
         return Err(io::Error::other("unexpected XCode6 MMR mapping"));
     }
