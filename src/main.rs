@@ -419,6 +419,10 @@ fn cmd_dmd_regs() -> i32 {
         regs.lock,
         if regs.lock & 0x20 != 0 { "LOCK" } else { "UNLOCK" }
     );
+    println!(
+        "ISDB-S requested TSID 2f/30={:04x} TSSET 31={:02x}",
+        regs.isdbs_tsid, regs.isdbs_tsset
+    );
     print!("bank0 (i2c 0x10):");
     for (reg, value) in regs.bank0 {
         print!(" {reg:02x}={value:02x}");

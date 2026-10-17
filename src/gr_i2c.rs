@@ -37,6 +37,8 @@ pub struct IsdbsTsExclusiveResult {
 /// test of that model; it changes nothing.
 pub struct DmdOutputRegs {
     pub lock: u8,
+    pub isdbs_tsid: u16,
+    pub isdbs_tsset: u8,
     /// `(register, value)` for I2C 7-bit `0x10` (SC1501A bank 0).
     pub bank0: [(u8, u8); 6],
     /// `(register, value)` for I2C 7-bit `0x17` (SC1501A bank 7).
@@ -423,6 +425,9 @@ mod arm_linux {
         let bus = I2c0::open()?;
         let result = (|| -> io::Result<DmdOutputRegs> {
             let lock = bus.read(0x12, 0x5e, 1)?[0];
+            let tsid = bus.read(0x12, 0x2f, 2)?;
+            let isdbs_tsid = u16::from_be_bytes([tsid[0], tsid[1]]);
+            let isdbs_tsset = bus.read(0x12, 0x31, 1)?[0];
             let mut bank0 = [(0u8, 0u8); 6];
             for (slot, reg) in bank0.iter_mut().zip(DMD_BANK0_REGS) {
                 *slot = (reg, bus.read(0x10, reg, 1)?[0]);
@@ -435,7 +440,7 @@ mod arm_linux {
             for (slot, reg) in isdbt_page.iter_mut().zip(DMD_ISDBT_ROUTE_REGS) {
                 *slot = (reg, bus.read(0x16, reg, 1)?[0]);
             }
-            Ok(DmdOutputRegs { lock, bank0, bank7, isdbt_page })
+            Ok(DmdOutputRegs { lock, isdbs_tsid, isdbs_tsset, bank0, bank7, isdbt_page })
         })();
         let release = guard.release();
         match (result, release) {
