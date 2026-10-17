@@ -94,7 +94,7 @@ USAGE:
   mkra dmd-doset-route-probe
   mkra dmd-doset-t-route-probe
   mkra dmd-serial-route-probe --out <path> --seconds <1..8> --tsi-port 0 [--tsi-logical-port <0|1>]
-  mkra dmd-tsset2-probe --out <path> --seconds <1..8> --tsi-port 0 [--tsi-logical-port <0|1>]
+  mkra dmd-tsset2-probe --out <path> --seconds <1..8> --tsi-port <0|1> [--tsi-logical-port <0|1>]
   mkra dmd-tsa-probe
   mkra dmd-tsout-base | dmd-tsout-tlv
   mkra dmd-iface-serial | dmd-iface-isdbs | dmd-quiesce
@@ -560,13 +560,14 @@ fn cmd_dmd_doset_probe(route_a: bool, doset_t_enabled: bool) -> i32 {
 
 fn cmd_dmd_output_probe(opts: &Options, tsset2_only: bool) -> i32 {
     if opts.out.is_none()
-        || opts.tsi_port != 0
+        || (tsset2_only && opts.tsi_port > 1)
+        || (!tsset2_only && opts.tsi_port != 0)
         || opts.demux_no_filter
         || !opts.pids.is_empty()
         || opts.demux_pat_section
         || !(1..=8).contains(&opts.seconds)
     {
-        eprintln!("mkra: output probe requires --out, --tsi-port 0, full TS filter and --seconds 1..8");
+        eprintln!("mkra: output probe requires --out, an allowed TSI port, full TS filter and --seconds 1..8");
         return 2;
     }
     let capture = || {
