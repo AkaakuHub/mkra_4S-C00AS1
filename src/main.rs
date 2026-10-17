@@ -164,7 +164,7 @@ GRAPH OPTIONS (all read-only: /dev/kmem + xc_map, no buffer ioctl):
 
 TSI-MMR (read-only):
   Reads the fixed XCode6 TSI enable/status/config/CRC/crossbar MMR words and
-  issues status ioctl 0x51 for physical TSI0 and TSI1. It performs no config,
+  issues status ioctl 0x51 for physical TSI0 through TSI7. It performs no config,
   graph, buffer, tune, I2C, SPI, or firmware write.
 
 ISDBS-TS-EXCLUSIVE (one fixed I2C write):
@@ -4128,7 +4128,7 @@ fn cmd_tsi_mmr(opts: &Options) -> i32 {
     }
 
     println!("XCode6 TSI status ioctl 0x51 (read-only):");
-    for port in 0..=1 {
+    for port in 0..=7 {
         match drv.tsi_status(port) {
             Ok((locked, crc)) => println!(
                 "  TSI{port}: lock={} crc=0x{crc:02x}",
