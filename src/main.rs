@@ -2673,7 +2673,7 @@ fn parse_latest_demux_pdev(text: &str) -> Option<u32> {
 }
 
 fn wait_for_gate5b10_pdev(log_start: u64) -> Result<u32, String> {
-    let deadline = Instant::now() + Duration::from_secs(2);
+    let deadline = Instant::now() + Duration::from_secs(12);
     loop {
         if let Ok(text) = read_fwlog_since(log_start) {
             if let Some(pdev) = parse_latest_demux_pdev(&text) {
@@ -2688,7 +2688,7 @@ fn wait_for_gate5b10_pdev(log_start: u64) -> Result<u32, String> {
         }
         if Instant::now() >= deadline {
             return Err(format!(
-                "firmware DEMUX pdev was not reported in {GATE5B9_FW_LOG} within 2 s"
+                "firmware DEMUX pdev was not reported in {GATE5B9_FW_LOG} within 12 s"
             ));
         }
         std::thread::sleep(Duration::from_millis(20));
