@@ -561,17 +561,23 @@ pub struct Tap {
 impl Tap {
     pub fn open(drv: Arc<XcDrv>, cfg: TapConfig) -> io::Result<Self> {
         let live = discover(&drv).map_err(io::Error::other)?;
-        // Refuse to build into a half-rebuilt graph. Measured: right after a
-        // channel change the ES rings exist but the product's audio decoder
-        // has not reattached yet, and every ioctl against them then returns
-        // XCE_TIMEOUT — which leaves a half-built REMUX behind that stops the
-        // product from rebuilding at all. Both product decoders being attached
-        // is the cheap, reliable signal that the chain is live.
         if live.video_readers == 0 || live.audio_readers == 0 {
-            return Err(io::Error::other(format!(
-                "the product's decode chain is not up yet (video readers {}, audio readers {})",
-                live.video_readers, live.audio_readers
-            )));
+            let video_before = drv.sbuf_status_raw(live.video_es)?[10];
+            let audio_before = drv.sbuf_status_raw(live.audio_es)?[10];
+            std::thread::sleep(Duration::from_millis(600));
+            let current = discover(&drv).map_err(io::Error::other)?;
+            let same_graph = current.mmt_demux == live.mmt_demux
+                && current.pipeline == live.pipeline
+                && current.video_es == live.video_es
+                && current.audio_es == live.audio_es;
+            let video_after = drv.sbuf_status_raw(live.video_es)?[10];
+            let audio_after = drv.sbuf_status_raw(live.audio_es)?[10];
+            if !same_graph || video_before == video_after || audio_before == audio_after {
+                return Err(io::Error::other(format!(
+                    "4K ES graph is rebuilding or stalled (video {video_before:#x}->{video_after:#x}, audio {audio_before:#x}->{audio_after:#x})"
+                )));
+            }
+            eprintln!("remux4k: both ES writers advanced without product decoder readers");
         }
         let level = drv.sbuf_status_raw(live.video_es)?[5];
         if level >= cfg.es_level_abort {
