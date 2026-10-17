@@ -83,6 +83,7 @@ USAGE:
   mkra isdbs-ts-exclusive
   mkra dmd-regs
   mkra dmd-hiz-probe
+  mkra dmd-doset-probe
   mkra dmd-tsa-probe
   mkra dmd-tsout-base | dmd-tsout-tlv
   mkra dmd-iface-serial | dmd-iface-isdbs | dmd-quiesce
@@ -350,6 +351,7 @@ fn main() {
         "isdbs-status" => cmd_isdbs_status(),
         "dmd-regs" => cmd_dmd_regs(),
         "dmd-hiz-probe" => cmd_dmd_hiz_probe(false),
+        "dmd-doset-probe" => cmd_dmd_doset_probe(),
         "dmd-tsa-probe" => cmd_dmd_hiz_probe(true),
         "dmd-tsout-base" => cmd_dmd_tsout(gr_i2c::TsoutTarget::Base),
         "dmd-tsout-tlv" => cmd_dmd_tsout(gr_i2c::TsoutTarget::TlvSpi1Bit),
@@ -466,6 +468,29 @@ fn cmd_dmd_hiz_probe(route_a: bool) -> i32 {
         }
         Err(e) => {
             eprintln!("mkra: HIZ probe failed: {e}");
+            1
+        }
+    }
+}
+
+fn cmd_dmd_doset_probe() -> i32 {
+    match gr_i2c::probe_doset() {
+        Ok(result) => {
+            println!("SC1501A DOSET1_S active readback: {:02x}", result.active_readback);
+            for (stage, statuses) in [
+                ("before", result.before),
+                ("enabled", result.enabled),
+                ("restored", result.restored),
+            ] {
+                for (port, (lock, crc)) in statuses.into_iter().enumerate() {
+                    println!("TSI{port} {stage}: lock={} crc=0x{crc:02x}", u8::from(lock));
+                }
+            }
+            println!("SC1501A DOSET1_S restored to 00");
+            0
+        }
+        Err(e) => {
+            eprintln!("mkra: DOSET1_S probe failed: {e}");
             1
         }
     }

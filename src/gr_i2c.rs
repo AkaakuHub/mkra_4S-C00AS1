@@ -51,6 +51,13 @@ pub struct HizProbeResult {
     pub restored: (bool, u8),
 }
 
+pub struct DosetProbeResult {
+    pub before: [(bool, u8); 2],
+    pub active_readback: u8,
+    pub enabled: [(bool, u8); 2],
+    pub restored: [(bool, u8); 2],
+}
+
 /// Bank-0 registers sampled by [`DmdOutputRegs`], in report order.
 pub const DMD_BANK0_REGS: [u8; 6] = [0x0b, 0x0c, 0x13, 0x16, 0x18, 0xcc];
 /// Bank-7 registers sampled by [`DmdOutputRegs`], in report order.
@@ -191,7 +198,7 @@ pub fn classify_tsout(regs: &[(u8, u8)]) -> TsoutFraming {
 #[cfg(all(target_os = "linux", target_arch = "arm"))]
 mod arm_linux {
     use super::{
-        is_isdbt_locked, DmdOutputRegs, HizProbeResult, IsdbsStatus, IsdbsTsExclusiveResult, TsoutRestoreResult,
+        is_isdbt_locked, DmdOutputRegs, DosetProbeResult, HizProbeResult, IsdbsStatus, IsdbsTsExclusiveResult, TsoutRestoreResult,
         TuneResult, Write, DMD_BANK0_REGS, DMD_BANK7_REGS, DMD_ISDBT_ROUTE_REGS,
     };
     use crate::i2c_lock::I2c0Guard;
@@ -493,6 +500,49 @@ mod arm_linux {
             let (active_readback, enabled) = sample?;
             let restored = drv.tsi_status(1)?;
             Ok(HizProbeResult { before, active_readback, enabled, restored })
+        })();
+        let release = guard.release();
+        match (result, release) {
+            (Err(e), _) => Err(e),
+            (Ok(_), Err(e)) => Err(e),
+            (Ok(v), Ok(())) => Ok(v),
+        }
+    }
+
+    pub fn probe_doset() -> io::Result<DosetProbeResult> {
+        let guard = I2c0Guard::attach_and_take()?;
+        let bus = I2c0::open()?;
+        let result = (|| -> io::Result<DosetProbeResult> {
+            let lock = bus.read(0x12, 0x5e, 1)?[0];
+            let pin = bus.read(0x10, 0x0b, 1)?[0];
+            let mode = bus.read(0x10, 0x16, 1)?[0];
+            let enable = bus.read(0x10, 0xcc, 1)?[0];
+            let doset = bus.read(0x12, 0x73, 1)?[0];
+            if lock & 0x20 == 0 || pin != 1 || mode != 0 || enable != 0xc0 || doset != 0 {
+                return Err(io::Error::other(format!(
+                    "refuse: lock={lock:02x} pin={pin:02x} mode={mode:02x} enable={enable:02x} doset={doset:02x}"
+                )));
+            }
+            let drv = crate::xcdrv::XcDrv::open_path(crate::xcdrv::DEV_PATH)?;
+            drv.configure_product_mpeg_ts_tsi(1)?;
+            let before = [drv.tsi_status(0)?, drv.tsi_status(1)?];
+            let sample = (|| -> io::Result<(u8, [(bool, u8); 2])> {
+                bus.write(0x12, 0x73, &[0x80])?;
+                let active_readback = bus.read(0x12, 0x73, 1)?[0];
+                std::thread::sleep(Duration::from_secs(1));
+                Ok((active_readback, [drv.tsi_status(0)?, drv.tsi_status(1)?]))
+            })();
+            let restore = bus.write(0x12, 0x73, &[doset]);
+            restore?;
+            let restored_readback = bus.read(0x12, 0x73, 1)?[0];
+            if restored_readback != doset {
+                return Err(io::Error::other(format!(
+                    "DOSET1_S restore readback {restored_readback:02x}, expected {doset:02x}"
+                )));
+            }
+            let (active_readback, enabled) = sample?;
+            let restored = [drv.tsi_status(0)?, drv.tsi_status(1)?];
+            Ok(DosetProbeResult { before, active_readback, enabled, restored })
         })();
         let release = guard.release();
         match (result, release) {
@@ -808,8 +858,16 @@ mod arm_linux {
 pub use arm_linux::{
     make_isdbs_ts_output_exclusive, quiesce_ts_output, read_isdbs_status, read_output_regs,
     select_tlv_output_exclusive, set_tsout_framing, set_tsout_interface, snapshot_watchlist,
-    standby_isdbt, tune, probe_hiz,
+    standby_isdbt, tune, probe_hiz, probe_doset,
 };
+
+#[cfg(not(all(target_os = "linux", target_arch = "arm")))]
+pub fn probe_doset() -> std::io::Result<DosetProbeResult> {
+    Err(std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        "SC1501A DOSET1_S probe is available only in the ARM device build",
+    ))
+}
 
 #[cfg(not(all(target_os = "linux", target_arch = "arm")))]
 pub fn probe_hiz(_route_a: bool) -> std::io::Result<HizProbeResult> {
