@@ -83,6 +83,7 @@ USAGE:
   mkra isdbs-ts-exclusive
   mkra dmd-regs
   mkra dmd-hiz-probe
+  mkra dmd-tsa-probe
   mkra dmd-tsout-base | dmd-tsout-tlv
   mkra dmd-iface-serial | dmd-iface-isdbs | dmd-quiesce
   mkra dmd-mode16-serial | dmd-mode16-isdbs
@@ -348,7 +349,8 @@ fn main() {
         "gr-off" => cmd_gr_off(),
         "isdbs-status" => cmd_isdbs_status(),
         "dmd-regs" => cmd_dmd_regs(),
-        "dmd-hiz-probe" => cmd_dmd_hiz_probe(),
+        "dmd-hiz-probe" => cmd_dmd_hiz_probe(false),
+        "dmd-tsa-probe" => cmd_dmd_hiz_probe(true),
         "dmd-tsout-base" => cmd_dmd_tsout(gr_i2c::TsoutTarget::Base),
         "dmd-tsout-tlv" => cmd_dmd_tsout(gr_i2c::TsoutTarget::TlvSpi1Bit),
         "dmd-iface-serial" => cmd_dmd_iface(gr_i2c::TsoutInterface::Serial1Bit),
@@ -441,8 +443,8 @@ fn cmd_dmd_regs() -> i32 {
     0
 }
 
-fn cmd_dmd_hiz_probe() -> i32 {
-    match gr_i2c::probe_hiz() {
+fn cmd_dmd_hiz_probe(route_a: bool) -> i32 {
+    match gr_i2c::probe_hiz(route_a) {
         Ok(result) => {
             println!("XCode6 physical TSI1 configured for 188-byte MPEG-TS during probe");
             println!(
@@ -457,6 +459,9 @@ fn cmd_dmd_hiz_probe() -> i32 {
                 println!("TSI1 {stage}: lock={} crc=0x{crc:02x}", u8::from(lock));
             }
             println!("SC1501A HIZSET1/2 restored to ff/ff");
+            if route_a {
+                println!("SC1501A TS A/B selectors restored to 00/00");
+            }
             0
         }
         Err(e) => {

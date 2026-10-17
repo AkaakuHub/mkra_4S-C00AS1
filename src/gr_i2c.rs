@@ -438,7 +438,7 @@ mod arm_linux {
         }
     }
 
-    pub fn probe_hiz() -> io::Result<HizProbeResult> {
+    pub fn probe_hiz(route_a: bool) -> io::Result<HizProbeResult> {
         let guard = I2c0Guard::attach_and_take()?;
         let bus = I2c0::open()?;
         let result = (|| -> io::Result<HizProbeResult> {
@@ -447,9 +447,16 @@ mod arm_linux {
             let selector = bus.read(0x10, 0xcc, 1)?[0];
             let hiz1 = bus.read(0x16, 0x0a, 1)?[0];
             let hiz2 = bus.read(0x16, 0x0b, 1)?[0];
+            let tsset1 = bus.read(0x16, 0x05, 1)?[0];
+            let tsset3 = bus.read(0x16, 0x07, 1)?[0];
             if lock & 0x20 == 0 || ts_pin != 1 || selector != 0xc0 || (hiz1, hiz2) != (0xff, 0xff) {
                 return Err(io::Error::other(format!(
                     "refuse: lock={lock:02x} ts={ts_pin:02x} selector={selector:02x} hiz={hiz1:02x}/{hiz2:02x}"
+                )));
+            }
+            if route_a && (tsset1, tsset3) != (0, 0) {
+                return Err(io::Error::other(format!(
+                    "refuse: TS A/B selectors are {tsset1:02x}/{tsset3:02x}, expected 00/00"
                 )));
             }
             let drv = crate::xcdrv::XcDrv::open_path(crate::xcdrv::DEV_PATH)?;
@@ -457,16 +464,27 @@ mod arm_linux {
             let sample = (|| -> io::Result<((u8, u8), (bool, u8))> {
                 bus.write(0x16, 0x0a, &[0x80])?;
                 bus.write(0x16, 0x0b, &[0xe0])?;
+                if route_a {
+                    bus.write(0x16, 0x05, &[0x0c])?;
+                    bus.write(0x16, 0x07, &[0x60])?;
+                }
                 let active1 = bus.read(0x16, 0x0a, 1)?[0];
                 let active2 = bus.read(0x16, 0x0b, 1)?[0];
                 drv.configure_product_mpeg_ts_tsi(1)?;
                 std::thread::sleep(Duration::from_secs(1));
                 Ok(((active1, active2), drv.tsi_status(1)?))
             })();
+            let restore_tsset1 = if route_a { bus.write(0x16, 0x05, &[0]) } else { Ok(()) };
+            let restore_tsset3 = if route_a { bus.write(0x16, 0x07, &[0]) } else { Ok(()) };
             let restore1 = bus.write(0x16, 0x0a, &[0xff]);
             let restore2 = bus.write(0x16, 0x0b, &[0xff]);
+            restore_tsset1?;
+            restore_tsset3?;
             restore1?;
             restore2?;
+            if route_a && (bus.read(0x16, 0x05, 1)?[0], bus.read(0x16, 0x07, 1)?[0]) != (0, 0) {
+                return Err(io::Error::other("TS A/B selectors restore readback mismatch"));
+            }
             if bus.read(0x16, 0x0a, 1)?[0] != 0xff
                 || bus.read(0x16, 0x0b, 1)?[0] != 0xff
             {
@@ -794,7 +812,7 @@ pub use arm_linux::{
 };
 
 #[cfg(not(all(target_os = "linux", target_arch = "arm")))]
-pub fn probe_hiz() -> std::io::Result<HizProbeResult> {
+pub fn probe_hiz(_route_a: bool) -> std::io::Result<HizProbeResult> {
     Err(std::io::Error::new(
         std::io::ErrorKind::Unsupported,
         "SC1501A HIZ probe is available only in the ARM device build",
