@@ -78,7 +78,7 @@ USAGE:
   mkra fem-dev --path <1..6> (--dev <hex> | --disconnect) [--dry-run]
   mkra cpld --reg <0..4> [--set <hex> --expect <hex>]
   mkra tsrec --out <path> [--seconds <n>] [--tsi-port <n>]
-  mkra demux --out <path> [--seconds <n>] [--tsi-port <n>] [--tsi-logical-port <0|1>] [--tsi-explicit-route] [--tsi-crossbar-source <1>] [--tsi-packet <188|192|204|130>] [--tsi-use-sync] [--tsi-parallel]
+  mkra demux --out <path> [--seconds <n>] [--tsi-port <n>] [--tsi-logical-port <0|1>] [--tsi-explicit-route] [--tsi-crossbar-source <1>] [--tsi-packet <188|192|204|130>] [--tsi-use-sync] [--tsi-parallel] [--tsi-positive-edge]
              [--pid <0..8191>|--pat-section] [--run-after-filter] [--dry-run]
   mkra remux4k --out <path> [--seconds <n>] [--tsid <hex>] [--dry-run]
   mkra tune4k  --sid <101|102|141|151|161|171|181|211|221|231> [--oid <n>] [--dry-run]
@@ -86,6 +86,7 @@ USAGE:
   mkra gr-off
   mkra isdbs-status
   mkra tsi-crossbar-restore
+  mkra tsi-edge-restore
   mkra isdbs-tmcc-tsids
   mkra isdbs-ts-exclusive
   mkra dmd-regs
@@ -377,6 +378,7 @@ fn main() {
         "gr-off" => cmd_gr_off(),
         "isdbs-status" => cmd_isdbs_status(),
         "tsi-crossbar-restore" => cmd_tsi_crossbar_restore(),
+        "tsi-edge-restore" => cmd_tsi_edge_restore(),
         "isdbs-tmcc-tsids" => cmd_isdbs_tmcc_tsids(),
         "dmd-regs" => cmd_dmd_regs(),
         "dmd-hiz-probe" => cmd_dmd_hiz_probe(false),
@@ -940,6 +942,7 @@ struct Options {
     /// `m_use_sync_bit`, word 4 of the physical TSI request. Gate 5E2-SYNC.
     tsi_use_sync: bool,
     tsi_parallel: bool,
+    tsi_positive_edge: bool,
     channel: Option<u8>,
     if_hz: u32,
 }
@@ -951,6 +954,7 @@ impl Options {
             tsi_packet: xcdrv::ME_PACKET_188,
             tsi_use_sync: false,
             tsi_parallel: false,
+            tsi_positive_edge: false,
             command: args[0].clone(),
             port: 40772,
             bind: "0.0.0.0".into(),
@@ -1129,6 +1133,7 @@ impl Options {
                 "--label" => o.label = Some(value()?),
                 "--tsi-use-sync" => o.tsi_use_sync = true,
                 "--tsi-parallel" => o.tsi_parallel = true,
+                "--tsi-positive-edge" => o.tsi_positive_edge = true,
                 "--tsi-packet" => {
                     o.tsi_packet = match value()?.as_str() {
                         "188" => xcdrv::ME_PACKET_188,
@@ -2795,6 +2800,31 @@ fn cmd_tsi_crossbar_restore() -> i32 {
     }
 }
 
+fn cmd_tsi_edge_restore() -> i32 {
+    let result = (|| -> Result<(), String> {
+        let drv = XcDrv::open_path(xcdrv::DEV_PATH).map_err(|e| e.to_string())?;
+        let before = drv.mmr_read32(0x6008).map_err(|e| e.to_string())?;
+        if before == 0x0300_0300 {
+            println!("TSI1 edge already restored: 0x{before:08x}");
+            return Ok(());
+        }
+        if before != 0x0100_0300 {
+            return Err(format!("refuse: TSI edge MMR is 0x{before:08x}, expected 0x01000300"));
+        }
+        drv.configure_product_mpeg_ts_tsi(1).map_err(|e| e.to_string())?;
+        let after = drv.mmr_read32(0x6008).map_err(|e| e.to_string())?;
+        if after != 0x0300_0300 {
+            return Err(format!("TSI1 edge restore readback 0x{after:08x}"));
+        }
+        println!("TSI1 edge restored: 0x{before:08x} -> 0x{after:08x}");
+        Ok(())
+    })();
+    match result {
+        Ok(()) => 0,
+        Err(e) => { eprintln!("mkra: {e}"); 1 }
+    }
+}
+
 fn cmd_demux(opts: &Options) -> i32 {
     let Some(source) = opts.demux_crossbar_source else {
         return cmd_demux_core(opts);
@@ -2842,6 +2872,14 @@ fn cmd_demux_core(opts: &Options) -> i32 {
         eprintln!("mkra: --tsi-port must be 0..7");
         return 2;
     }
+    if opts.tsi_positive_edge
+        && (opts.tsi_port != 1 || opts.tsi_packet != xcdrv::ME_PACKET_188
+            || opts.tsi_use_sync || opts.tsi_parallel || opts.demux_crossbar_source.is_some()
+            || opts.demux_explicit_route || !(1..=8).contains(&opts.seconds))
+    {
+        eprintln!("mkra: --tsi-positive-edge requires TSI1, 188-byte serial input, direct route and --seconds 1..8");
+        return 2;
+    }
     if opts.demux_logical_port > 1 || (opts.demux_explicit_route && opts.demux_logical_port != 0) {
         eprintln!("mkra: --tsi-logical-port must be 0 or 1 and cannot be combined with --tsi-explicit-route");
         return 2;
@@ -2884,9 +2922,12 @@ fn cmd_demux_core(opts: &Options) -> i32 {
         println!("  ioctl 0x28         AV_SYNC create: [7,0,0,16,OUT_AVSYNC,0]");
         println!("  ioctl 0x000c002a   set AV_SYNC pipeline: [AVSYNC,PIPELINE]");
         println!(
-            "  ioctl 0x50         physical TSI: [{},{},{},1,{},0,1,0,1,0]",
-            opts.tsi_port, opts.tsi_packet, u32::from(opts.tsi_parallel), u32::from(opts.tsi_use_sync)
+            "  ioctl 0x50         physical TSI: [{},{},{},1,{},0,1,0,{},0]",
+            opts.tsi_port, opts.tsi_packet, u32::from(opts.tsi_parallel), u32::from(opts.tsi_use_sync), u32::from(!opts.tsi_positive_edge)
         );
+        if opts.tsi_positive_edge {
+            println!("  guarded TSI1 edge: MMR 0x6008 0x03000300 -> 0x01000300 -> 0x03000300");
+        }
         println!("  ioctl 0x0259002a   AV_SYNC live mode: [AVSYNC,1,1,0,0,0,0,0]");
         println!("  ioctl 0x28         DEMUX create: [0x0c,0,32,0,OUT_DEVICE,0]");
         println!("  ioctl 0x000c002a   set pipeline: [DEVICE,PIPELINE]");
@@ -2965,6 +3006,7 @@ fn cmd_demux_core(opts: &Options) -> i32 {
     let mut running = false;
     let mut device_stopped = false;
     let mut filter_added = false;
+    let mut edge_modified = false;
     let observe_resources = |stage: &str| -> Result<(), String> {
         if !opts.demux_observe_resources {
             return Ok(());
@@ -3034,8 +3076,22 @@ fn cmd_demux_core(opts: &Options) -> i32 {
         av_sync = drv.create_av_sync().map_err(|e| format!("create AV_SYNC: {e}"))?;
         drv.set_pipeline(av_sync, pipeline)
             .map_err(|e| format!("set AV_SYNC pipeline: {e}"))?;
-        drv.configure_physical_tsi(opts.tsi_port, opts.tsi_packet, opts.tsi_use_sync, opts.tsi_parallel)
-            .map_err(|e| format!("configure product MPEG-TS TSI{}: {e}", opts.tsi_port))?;
+        if opts.tsi_positive_edge {
+            let before = drv.mmr_read32(0x6008).map_err(|e| e.to_string())?;
+            if before != 0x0300_0300 {
+                return Err(format!("refuse: TSI edge MMR is 0x{before:08x}, expected 0x03000300"));
+            }
+            edge_modified = true;
+            drv.configure_physical_tsi_edge(1, xcdrv::ME_PACKET_188, false, false, false)
+                .map_err(|e| format!("configure positive-edge TSI1: {e}"))?;
+            let active = drv.mmr_read32(0x6008).map_err(|e| e.to_string())?;
+            if active != 0x0100_0300 {
+                return Err(format!("positive-edge TSI1 readback 0x{active:08x}"));
+            }
+        } else {
+            drv.configure_physical_tsi(opts.tsi_port, opts.tsi_packet, opts.tsi_use_sync, opts.tsi_parallel)
+                .map_err(|e| format!("configure product MPEG-TS TSI{}: {e}", opts.tsi_port))?;
+        }
         log_tsi("after physical config")?;
         if opts.demux_observe_tsi_route {
             log_gate5b10_route_snapshot(&drv, "after_physical_config", None)?;
@@ -3427,6 +3483,9 @@ fn cmd_demux_core(opts: &Options) -> i32 {
     }
     if let Err(e) = observe_resources("after_cleanup") {
         eprintln!("mkra: DIRTY_REBOOT_REQUIRED cleanup resource snapshot failed: {e}");
+    }
+    if edge_modified && cmd_tsi_edge_restore() != 0 {
+        return 1;
     }
 
     match capture {

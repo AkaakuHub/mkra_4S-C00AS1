@@ -853,8 +853,20 @@ impl XcDrv {
         use_sync: bool,
         parallel: bool,
     ) -> io::Result<()> {
+        self.configure_physical_tsi_edge(port, me_packet, use_sync, parallel, true)
+    }
+
+    pub fn configure_physical_tsi_edge(
+        &self,
+        port: u32,
+        me_packet: u32,
+        use_sync: bool,
+        parallel: bool,
+        negative_edge: bool,
+    ) -> io::Result<()> {
         let mut req = product_physical_tsi_request(port, me_packet, use_sync);
         req[2] = u32::from(parallel);
+        req[8] = u32::from(negative_edge);
         log_raw_words("physical TSI config request", &req);
         unsafe { self.call(TSI_CONFIG, &mut req)? };
         Ok(())
