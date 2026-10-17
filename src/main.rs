@@ -444,6 +444,10 @@ fn cmd_dmd_regs() -> i32 {
 fn cmd_dmd_hiz_probe() -> i32 {
     match gr_i2c::probe_hiz() {
         Ok(result) => {
+            println!(
+                "SC1501A HIZSET1/2 active readback: {:02x}/{:02x}",
+                result.active_readback.0, result.active_readback.1
+            );
             for (stage, (lock, crc)) in [
                 ("before", result.before),
                 ("enabled", result.enabled),

@@ -46,6 +46,7 @@ pub struct DmdOutputRegs {
 
 pub struct HizProbeResult {
     pub before: (bool, u8),
+    pub active_readback: (u8, u8),
     pub enabled: (bool, u8),
     pub restored: (bool, u8),
 }
@@ -453,18 +454,13 @@ mod arm_linux {
             }
             let drv = crate::xcdrv::XcDrv::open_path(crate::xcdrv::DEV_PATH)?;
             let before = drv.tsi_status(1)?;
-            let sample = (|| -> io::Result<(bool, u8)> {
+            let sample = (|| -> io::Result<((u8, u8), (bool, u8))> {
                 bus.write(0x16, 0x0a, &[0x80])?;
                 bus.write(0x16, 0x0b, &[0xe0])?;
                 let active1 = bus.read(0x16, 0x0a, 1)?[0];
                 let active2 = bus.read(0x16, 0x0b, 1)?[0];
-                if (active1, active2) != (0x80, 0xe0) {
-                    return Err(io::Error::other(format!(
-                        "HIZ write readback mismatch: {active1:02x}/{active2:02x}"
-                    )));
-                }
                 std::thread::sleep(Duration::from_secs(1));
-                drv.tsi_status(1)
+                Ok(((active1, active2), drv.tsi_status(1)?))
             })();
             let restore1 = bus.write(0x16, 0x0a, &[0xff]);
             let restore2 = bus.write(0x16, 0x0b, &[0xff]);
@@ -475,9 +471,9 @@ mod arm_linux {
             {
                 return Err(io::Error::other("HIZ restore readback mismatch"));
             }
-            let enabled = sample?;
+            let (active_readback, enabled) = sample?;
             let restored = drv.tsi_status(1)?;
-            Ok(HizProbeResult { before, enabled, restored })
+            Ok(HizProbeResult { before, active_readback, enabled, restored })
         })();
         let release = guard.release();
         match (result, release) {
