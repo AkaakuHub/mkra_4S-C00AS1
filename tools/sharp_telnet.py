@@ -464,6 +464,8 @@ class SharpTelnet:
         Returns the device-side md5. Raises if it does not match the local
         file, so a truncated transfer can never be mistaken for a good one.
         """
+        if not 1 <= chunk <= UPLOAD_CHUNK:
+            raise ValueError("chunk must be between 1 and %d" % UPLOAD_CHUNK)
         assert_microtest_path(remote_path)
         with open(local_path, "rb") as fh:
             payload = fh.read()
