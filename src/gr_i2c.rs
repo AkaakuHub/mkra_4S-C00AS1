@@ -509,7 +509,7 @@ mod arm_linux {
         }
     }
 
-    pub fn probe_doset(route_a: bool) -> io::Result<DosetProbeResult> {
+    pub fn probe_doset(route_a: bool, doset_t_enabled: bool) -> io::Result<DosetProbeResult> {
         let guard = I2c0Guard::attach_and_take()?;
         let bus = I2c0::open()?;
         let result = (|| -> io::Result<DosetProbeResult> {
@@ -518,6 +518,7 @@ mod arm_linux {
             let mode = bus.read(0x10, 0x16, 1)?[0];
             let enable = bus.read(0x10, 0xcc, 1)?[0];
             let doset = bus.read(0x12, 0x73, 1)?[0];
+            let doset_t = bus.read(0x16, 0xcf, 1)?[0];
             let hiz = [bus.read(0x16, 0x0a, 1)?[0], bus.read(0x16, 0x0b, 1)?[0]];
             let route = [bus.read(0x16, 0x05, 1)?[0], bus.read(0x16, 0x07, 1)?[0]];
             if lock & 0x20 == 0 || pin != 1 || mode != 0 || enable != 0xc0 || doset != 0 {
@@ -528,6 +529,11 @@ mod arm_linux {
             if route_a && (hiz != [0xff, 0xff] || route != [0, 0]) {
                 return Err(io::Error::other(format!(
                     "refuse: HIZ={hiz:02x?} route={route:02x?}"
+                )));
+            }
+            if doset_t_enabled && (!route_a || doset_t != 0xff) {
+                return Err(io::Error::other(format!(
+                    "refuse: full route requires DOSET1_T=ff, found {doset_t:02x}"
                 )));
             }
             let drv = crate::xcdrv::XcDrv::open_path(crate::xcdrv::DEV_PATH)?;
@@ -541,6 +547,9 @@ mod arm_linux {
                     bus.write(0x16, 0x07, &[0x60])?;
                     bus.write(0x10, 0x16, &[0x21])?;
                 }
+                if doset_t_enabled {
+                    bus.write(0x16, 0xcf, &[0x95])?;
+                }
                 bus.write(0x12, 0x73, &[0x80])?;
                 let active_readback = bus.read(0x12, 0x73, 1)?[0];
                 std::thread::sleep(Duration::from_secs(1));
@@ -549,6 +558,7 @@ mod arm_linux {
             let restores = if route_a {
                 [
                     bus.write(0x12, 0x73, &[doset]),
+                    if doset_t_enabled { bus.write(0x16, 0xcf, &[doset_t]) } else { Ok(()) },
                     bus.write(0x10, 0x16, &[mode]),
                     bus.write(0x16, 0x07, &[route[1]]),
                     bus.write(0x16, 0x05, &[route[0]]),
@@ -556,7 +566,7 @@ mod arm_linux {
                     bus.write(0x16, 0x0a, &[hiz[0]]),
                 ]
             } else {
-                [bus.write(0x12, 0x73, &[doset]), Ok(()), Ok(()), Ok(()), Ok(()), Ok(())]
+                [bus.write(0x12, 0x73, &[doset]), Ok(()), Ok(()), Ok(()), Ok(()), Ok(()), Ok(())]
             };
             for restore in restores {
                 restore?;
@@ -574,6 +584,9 @@ mod arm_linux {
                 if mode_after != mode || route_after != route || hiz_after != hiz {
                     return Err(io::Error::other("combined route restore readback mismatch"));
                 }
+            }
+            if doset_t_enabled && bus.read(0x16, 0xcf, 1)?[0] != doset_t {
+                return Err(io::Error::other("DOSET1_T restore readback mismatch"));
             }
             let (active_readback, enabled) = sample?;
             let restored = [drv.tsi_status(0)?, drv.tsi_status(1)?];
@@ -897,7 +910,7 @@ pub use arm_linux::{
 };
 
 #[cfg(not(all(target_os = "linux", target_arch = "arm")))]
-pub fn probe_doset(_route_a: bool) -> std::io::Result<DosetProbeResult> {
+pub fn probe_doset(_route_a: bool, _doset_t_enabled: bool) -> std::io::Result<DosetProbeResult> {
     Err(std::io::Error::new(
         std::io::ErrorKind::Unsupported,
         "SC1501A DOSET1_S probe is available only in the ARM device build",

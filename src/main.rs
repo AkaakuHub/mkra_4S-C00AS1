@@ -85,6 +85,7 @@ USAGE:
   mkra dmd-hiz-probe
   mkra dmd-doset-probe
   mkra dmd-doset-route-probe
+  mkra dmd-doset-t-route-probe
   mkra dmd-tsa-probe
   mkra dmd-tsout-base | dmd-tsout-tlv
   mkra dmd-iface-serial | dmd-iface-isdbs | dmd-quiesce
@@ -352,8 +353,9 @@ fn main() {
         "isdbs-status" => cmd_isdbs_status(),
         "dmd-regs" => cmd_dmd_regs(),
         "dmd-hiz-probe" => cmd_dmd_hiz_probe(false),
-        "dmd-doset-probe" => cmd_dmd_doset_probe(false),
-        "dmd-doset-route-probe" => cmd_dmd_doset_probe(true),
+        "dmd-doset-probe" => cmd_dmd_doset_probe(false, false),
+        "dmd-doset-route-probe" => cmd_dmd_doset_probe(true, false),
+        "dmd-doset-t-route-probe" => cmd_dmd_doset_probe(true, true),
         "dmd-tsa-probe" => cmd_dmd_hiz_probe(true),
         "dmd-tsout-base" => cmd_dmd_tsout(gr_i2c::TsoutTarget::Base),
         "dmd-tsout-tlv" => cmd_dmd_tsout(gr_i2c::TsoutTarget::TlvSpi1Bit),
@@ -475,8 +477,8 @@ fn cmd_dmd_hiz_probe(route_a: bool) -> i32 {
     }
 }
 
-fn cmd_dmd_doset_probe(route_a: bool) -> i32 {
-    match gr_i2c::probe_doset(route_a) {
+fn cmd_dmd_doset_probe(route_a: bool, doset_t_enabled: bool) -> i32 {
+    match gr_i2c::probe_doset(route_a, doset_t_enabled) {
         Ok(result) => {
             println!("SC1501A DOSET1_S active readback: {:02x}", result.active_readback);
             for (stage, statuses) in [
@@ -491,6 +493,9 @@ fn cmd_dmd_doset_probe(route_a: bool) -> i32 {
             println!("SC1501A DOSET1_S restored to 00");
             if route_a {
                 println!("SC1501A output-A, HIZ, and 1-bit interface restored");
+            }
+            if doset_t_enabled {
+                println!("SC1501A DOSET1_T restored to ff");
             }
             0
         }
