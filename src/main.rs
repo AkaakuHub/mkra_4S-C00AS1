@@ -87,6 +87,7 @@ USAGE:
   mkra isdbs-status
   mkra tsi-crossbar-restore
   mkra tsi-edge-restore
+  mkra tsi-edge-status-probe
   mkra isdbs-tmcc-tsids
   mkra isdbs-ts-exclusive
   mkra dmd-regs
@@ -379,6 +380,7 @@ fn main() {
         "isdbs-status" => cmd_isdbs_status(),
         "tsi-crossbar-restore" => cmd_tsi_crossbar_restore(),
         "tsi-edge-restore" => cmd_tsi_edge_restore(),
+        "tsi-edge-status-probe" => cmd_tsi_edge_status_probe(),
         "isdbs-tmcc-tsids" => cmd_isdbs_tmcc_tsids(),
         "dmd-regs" => cmd_dmd_regs(),
         "dmd-hiz-probe" => cmd_dmd_hiz_probe(false),
@@ -2823,6 +2825,45 @@ fn cmd_tsi_edge_restore() -> i32 {
         Ok(()) => 0,
         Err(e) => { eprintln!("mkra: {e}"); 1 }
     }
+}
+
+fn cmd_tsi_edge_status_probe() -> i32 {
+    let mut modified = false;
+    let result = (|| -> Result<(), String> {
+        let status = gr_i2c::read_isdbs_status().map_err(|e| e.to_string())?;
+        if status.lock != 0x67 || status.ts_pin != 0x01 || status.ts_serial != 0xc0 {
+            return Err(format!(
+                "refuse: ISDB-S state lock={:02x} ts_pin={:02x} ts_serial={:02x}",
+                status.lock, status.ts_pin, status.ts_serial
+            ));
+        }
+        let drv = XcDrv::open_path(xcdrv::DEV_PATH).map_err(|e| e.to_string())?;
+        let before = drv.mmr_read32(0x6008).map_err(|e| e.to_string())?;
+        if before != 0x0300_0300 {
+            return Err(format!("refuse: TSI edge MMR is 0x{before:08x}, expected 0x03000300"));
+        }
+        let (lock, crc) = drv.tsi_status(1).map_err(|e| e.to_string())?;
+        println!("TSI1 before: lock={} crc={crc:02x}", u8::from(lock));
+        modified = true;
+        drv.configure_physical_tsi_edge(1, xcdrv::ME_PACKET_188, false, false, false)
+            .map_err(|e| format!("configure positive-edge TSI1: {e}"))?;
+        let active = drv.mmr_read32(0x6008).map_err(|e| e.to_string())?;
+        if active != 0x0100_0300 {
+            return Err(format!("positive-edge TSI1 readback 0x{active:08x}"));
+        }
+        for sample in 1..=4 {
+            std::thread::sleep(Duration::from_millis(250));
+            let (lock, crc) = drv.tsi_status(1).map_err(|e| e.to_string())?;
+            println!("TSI1 positive-edge sample {sample}: lock={} crc={crc:02x}", u8::from(lock));
+        }
+        Ok(())
+    })();
+    let restore = if modified { cmd_tsi_edge_restore() } else { 0 };
+    if let Err(e) = result {
+        eprintln!("mkra: {e}");
+        return 1;
+    }
+    restore
 }
 
 fn cmd_demux(opts: &Options) -> i32 {
