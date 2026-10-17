@@ -666,6 +666,7 @@ mod arm_linux {
                 (0x16, 0x0a, 0xff, 0x80),
                 (0x16, 0x0b, 0xff, 0xe0),
                 (0x16, 0x05, 0x00, 0x0c),
+                (0x16, 0x06, 0x40, 0x00),
                 (0x16, 0x07, 0x00, 0x60),
                 (0x16, 0xcf, 0xff, 0x95),
                 (0x12, 0x73, 0x00, 0x80),
@@ -697,7 +698,7 @@ mod arm_linux {
                         )));
                     }
                 }
-                eprintln!("isdbs serial route active; capturing with all 10 register writes applied");
+                eprintln!("isdbs serial route active; capturing with all 11 register writes applied");
                 capture()
             })();
             let mut restore_error = None;
