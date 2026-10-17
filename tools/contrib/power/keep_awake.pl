@@ -56,6 +56,7 @@ sub verify_binary {
 
 my $missing = 0;
 my $last_wake = 0;
+my $wake_attempts = 0;
 while (1) {
     my ($pid) = process_state();
     verify_binary("/proc/$pid/exe", $firmware);
@@ -84,10 +85,12 @@ while (1) {
         my ($current_abs, $tuner, $av) = process_state();
         if ($av) {
             $missing = 0;
+            $wake_attempts = 0;
             next;
         }
         $missing++;
-        next if $missing < 2 || time - $last_wake < 30;
+        my $retry_interval = $wake_attempts >= 2 ? 300 : 30;
+        next if $missing < 2 || time - $last_wake < $retry_interval;
         $last_wake = time;
         verify_binary("/proc/$tuner/exe", $tuner_firmware);
         open(my $tmem, '<', "/proc/$tuner/mem") or die "tuner mem: $!\n";
@@ -97,6 +100,7 @@ while (1) {
         verify_binary('/tmp/mt/mkra', $receiver);
         print time . " av_pipeline=absent tuner_system=isdb-s3 wake=resume\n";
         my $result = system('/tmp/mt/mkra', 'tune4k', '--sid', '101', '--tune-mode', '3');
+        $wake_attempts++;
         print time . " wake_exit=$result\n";
     }
 }
