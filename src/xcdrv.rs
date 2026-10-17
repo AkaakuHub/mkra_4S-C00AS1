@@ -857,13 +857,6 @@ impl XcDrv {
         Ok(())
     }
 
-    pub fn restore_inactive_tsi1(&self) -> io::Result<()> {
-        let mut req = [1u32, 0, 0, 0, 0, 0, 0, 0, 0, 1];
-        log_raw_words("inactive TSI1 restore request", &req);
-        unsafe { self.call(TSI_CONFIG, &mut req)? };
-        Ok(())
-    }
-
     /// Read one physical TSI status without changing its configuration.
     /// `libvixs:xcode_tsi_status_check @0x7be48` returns per-port CRC samples
     /// in words 0..7 and the lock bitmask in word 8.
