@@ -82,6 +82,7 @@ USAGE:
   mkra isdbs-status
   mkra isdbs-ts-exclusive
   mkra dmd-regs
+  mkra dmd-hiz-probe
   mkra dmd-tsout-base | dmd-tsout-tlv
   mkra dmd-iface-serial | dmd-iface-isdbs | dmd-quiesce
   mkra dmd-mode16-serial | dmd-mode16-isdbs
@@ -347,6 +348,7 @@ fn main() {
         "gr-off" => cmd_gr_off(),
         "isdbs-status" => cmd_isdbs_status(),
         "dmd-regs" => cmd_dmd_regs(),
+        "dmd-hiz-probe" => cmd_dmd_hiz_probe(),
         "dmd-tsout-base" => cmd_dmd_tsout(gr_i2c::TsoutTarget::Base),
         "dmd-tsout-tlv" => cmd_dmd_tsout(gr_i2c::TsoutTarget::TlvSpi1Bit),
         "dmd-iface-serial" => cmd_dmd_iface(gr_i2c::TsoutInterface::Serial1Bit),
@@ -437,6 +439,26 @@ fn cmd_dmd_regs() -> i32 {
     );
     println!("No register was written.");
     0
+}
+
+fn cmd_dmd_hiz_probe() -> i32 {
+    match gr_i2c::probe_hiz() {
+        Ok(result) => {
+            for (stage, (lock, crc)) in [
+                ("before", result.before),
+                ("enabled", result.enabled),
+                ("restored", result.restored),
+            ] {
+                println!("TSI1 {stage}: lock={} crc=0x{crc:02x}", u8::from(lock));
+            }
+            println!("SC1501A HIZSET1/2 restored to ff/ff");
+            0
+        }
+        Err(e) => {
+            eprintln!("mkra: HIZ probe failed: {e}");
+            1
+        }
+    }
 }
 
 /// Install one of the two product-defined SC1501A output-framing states on

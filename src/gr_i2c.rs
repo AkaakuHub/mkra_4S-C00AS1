@@ -44,6 +44,12 @@ pub struct DmdOutputRegs {
     pub isdbt_page: [(u8, u8); 9],
 }
 
+pub struct HizProbeResult {
+    pub before: (bool, u8),
+    pub enabled: (bool, u8),
+    pub restored: (bool, u8),
+}
+
 /// Bank-0 registers sampled by [`DmdOutputRegs`], in report order.
 pub const DMD_BANK0_REGS: [u8; 6] = [0x0b, 0x0c, 0x13, 0x16, 0x18, 0xcc];
 /// Bank-7 registers sampled by [`DmdOutputRegs`], in report order.
@@ -184,7 +190,7 @@ pub fn classify_tsout(regs: &[(u8, u8)]) -> TsoutFraming {
 #[cfg(all(target_os = "linux", target_arch = "arm"))]
 mod arm_linux {
     use super::{
-        is_isdbt_locked, DmdOutputRegs, IsdbsStatus, IsdbsTsExclusiveResult, TsoutRestoreResult,
+        is_isdbt_locked, DmdOutputRegs, HizProbeResult, IsdbsStatus, IsdbsTsExclusiveResult, TsoutRestoreResult,
         TuneResult, Write, DMD_BANK0_REGS, DMD_BANK7_REGS, DMD_ISDBT_ROUTE_REGS,
     };
     use crate::i2c_lock::I2c0Guard;
@@ -422,6 +428,54 @@ mod arm_linux {
                 *slot = (reg, bus.read(0x16, reg, 1)?[0]);
             }
             Ok(DmdOutputRegs { lock, bank0, bank7, isdbt_page })
+        })();
+        let release = guard.release();
+        match (result, release) {
+            (Err(e), _) => Err(e),
+            (Ok(_), Err(e)) => Err(e),
+            (Ok(v), Ok(())) => Ok(v),
+        }
+    }
+
+    pub fn probe_hiz() -> io::Result<HizProbeResult> {
+        let guard = I2c0Guard::attach_and_take()?;
+        let bus = I2c0::open()?;
+        let result = (|| -> io::Result<HizProbeResult> {
+            let lock = bus.read(0x12, 0x5e, 1)?[0];
+            let ts_pin = bus.read(0x10, 0x0b, 1)?[0];
+            let selector = bus.read(0x10, 0xcc, 1)?[0];
+            let hiz1 = bus.read(0x16, 0x0a, 1)?[0];
+            let hiz2 = bus.read(0x16, 0x0b, 1)?[0];
+            if lock & 0x20 == 0 || ts_pin != 1 || selector != 0xc0 || (hiz1, hiz2) != (0xff, 0xff) {
+                return Err(io::Error::other(format!(
+                    "refuse: lock={lock:02x} ts={ts_pin:02x} selector={selector:02x} hiz={hiz1:02x}/{hiz2:02x}"
+                )));
+            }
+            let drv = crate::xcdrv::XcDrv::open_path(crate::xcdrv::DEV_PATH)?;
+            let before = drv.tsi_status(1)?;
+            let sample = (|| -> io::Result<(bool, u8)> {
+                bus.write(0x16, 0x0a, &[0x80])?;
+                bus.write(0x16, 0x0b, &[0xe0])?;
+                if bus.read(0x16, 0x0a, 1)?[0] != 0x80
+                    || bus.read(0x16, 0x0b, 1)?[0] != 0xe0
+                {
+                    return Err(io::Error::other("HIZ write readback mismatch"));
+                }
+                std::thread::sleep(Duration::from_secs(1));
+                drv.tsi_status(1)
+            })();
+            let restore1 = bus.write(0x16, 0x0a, &[0xff]);
+            let restore2 = bus.write(0x16, 0x0b, &[0xff]);
+            restore1?;
+            restore2?;
+            if bus.read(0x16, 0x0a, 1)?[0] != 0xff
+                || bus.read(0x16, 0x0b, 1)?[0] != 0xff
+            {
+                return Err(io::Error::other("HIZ restore readback mismatch"));
+            }
+            let enabled = sample?;
+            let restored = drv.tsi_status(1)?;
+            Ok(HizProbeResult { before, enabled, restored })
         })();
         let release = guard.release();
         match (result, release) {
@@ -737,8 +791,16 @@ mod arm_linux {
 pub use arm_linux::{
     make_isdbs_ts_output_exclusive, quiesce_ts_output, read_isdbs_status, read_output_regs,
     select_tlv_output_exclusive, set_tsout_framing, set_tsout_interface, snapshot_watchlist,
-    standby_isdbt, tune,
+    standby_isdbt, tune, probe_hiz,
 };
+
+#[cfg(not(all(target_os = "linux", target_arch = "arm")))]
+pub fn probe_hiz() -> std::io::Result<HizProbeResult> {
+    Err(std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        "SC1501A HIZ probe is available only in the ARM device build",
+    ))
+}
 
 #[cfg(not(all(target_os = "linux", target_arch = "arm")))]
 pub fn set_tsout_interface(_target: TsoutInterface) -> std::io::Result<TsoutRestoreResult> {
