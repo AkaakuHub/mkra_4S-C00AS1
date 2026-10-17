@@ -78,13 +78,14 @@ USAGE:
   mkra fem-dev --path <1..6> (--dev <hex> | --disconnect) [--dry-run]
   mkra cpld --reg <0..4> [--set <hex> --expect <hex>]
   mkra tsrec --out <path> [--seconds <n>] [--tsi-port <n>]
-  mkra demux --out <path> [--seconds <n>] [--tsi-port <n>] [--tsi-logical-port <0|1>] [--tsi-explicit-route] [--tsi-packet <188|192|204|130>] [--tsi-use-sync] [--tsi-parallel]
+  mkra demux --out <path> [--seconds <n>] [--tsi-port <n>] [--tsi-logical-port <0|1>] [--tsi-explicit-route] [--tsi-crossbar-source <1>] [--tsi-packet <188|192|204|130>] [--tsi-use-sync] [--tsi-parallel]
              [--pid <0..8191>|--pat-section] [--run-after-filter] [--dry-run]
   mkra remux4k --out <path> [--seconds <n>] [--tsid <hex>] [--dry-run]
   mkra tune4k  --sid <101|102|141|151|161|171|181|211|221|231> [--oid <n>] [--dry-run]
   mkra gr (--channel <13..62>|--freq <kHz>) [--if-hz <Hz>] [--dry-run]
   mkra gr-off
   mkra isdbs-status
+  mkra tsi-crossbar-restore
   mkra isdbs-tmcc-tsids
   mkra isdbs-ts-exclusive
   mkra dmd-regs
@@ -374,6 +375,7 @@ fn main() {
         "gr" => cmd_gr(&opts),
         "gr-off" => cmd_gr_off(),
         "isdbs-status" => cmd_isdbs_status(),
+        "tsi-crossbar-restore" => cmd_tsi_crossbar_restore(),
         "isdbs-tmcc-tsids" => cmd_isdbs_tmcc_tsids(),
         "dmd-regs" => cmd_dmd_regs(),
         "dmd-hiz-probe" => cmd_dmd_hiz_probe(false),
@@ -886,6 +888,7 @@ struct Options {
     demux_run_after_filter: bool,
     demux_ready_before_filter: bool,
     demux_explicit_route: bool,
+    demux_crossbar_source: Option<u32>,
     demux_logical_port: u32,
     /// remux4k: run only the read-only discovery step and print what it found.
     remux4k_discover_only: bool,
@@ -992,6 +995,7 @@ impl Options {
             demux_run_after_filter: false,
             demux_ready_before_filter: false,
             demux_explicit_route: false,
+            demux_crossbar_source: None,
             demux_logical_port: 0,
             remux4k_discover_only: false,
             remux4k_inject_psi: false,
@@ -1065,6 +1069,7 @@ impl Options {
                 "--run-after-filter" => o.demux_run_after_filter = true,
                 "--ready-before-filter" => o.demux_ready_before_filter = true,
                 "--tsi-explicit-route" => o.demux_explicit_route = true,
+                "--tsi-crossbar-source" => o.demux_crossbar_source = Some(parse_u32(&value()?, a)?),
                 "--tsi-logical-port" => o.demux_logical_port = parse_u32(&value()?, a)?,
                 "--discover-only" => o.remux4k_discover_only = true,
                 "--inject-psi" => o.remux4k_inject_psi = true,
@@ -2756,7 +2761,74 @@ fn log_sf_snapshot(stage: &str, base: u32, bytes: &[u8]) {
 /// SYSTEM/TS ring. The pipeline/AV_SYNC owner comes from `Dxd_InitSproInfo`,
 /// and every input-side value through `run` comes from `Dxd_CreateRoute`.
 /// The only added operation is the ARC-validated PID=-1 SYSTEM/TS output port.
+fn cmd_tsi_crossbar_restore() -> i32 {
+    let result = (|| -> Result<(), String> {
+        let drv = XcDrv::open_path(xcdrv::DEV_PATH).map_err(|e| e.to_string())?;
+        let before = drv.mmr_read32(0x61f0).map_err(|e| e.to_string())?;
+        if before == 0x10 {
+            println!("TSI crossbar already restored: 0x{before:08x}");
+            return Ok(());
+        }
+        if before != 0x11 {
+            return Err(format!("refuse: TSI crossbar is 0x{before:08x}, expected 0x00000011"));
+        }
+        drv.set_tsi_crossbar_input0(0).map_err(|e| e.to_string())?;
+        let after = drv.mmr_read32(0x61f0).map_err(|e| e.to_string())?;
+        if after != 0x10 {
+            return Err(format!("TSI crossbar restore readback 0x{after:08x}"));
+        }
+        println!("TSI crossbar restored: 0x{before:08x} -> 0x{after:08x}");
+        Ok(())
+    })();
+    match result {
+        Ok(()) => 0,
+        Err(e) => { eprintln!("mkra: {e}"); 1 }
+    }
+}
+
 fn cmd_demux(opts: &Options) -> i32 {
+    let Some(source) = opts.demux_crossbar_source else {
+        return cmd_demux_core(opts);
+    };
+    if source != 1 || opts.dev != xcdrv::DEV_PATH || opts.tsi_port != 1 || opts.demux_logical_port != 0
+        || opts.demux_explicit_route || !(1..=8).contains(&opts.seconds)
+    {
+        eprintln!("mkra: --tsi-crossbar-source 1 requires physical TSI1, logical input 0, direct route and --seconds 1..8");
+        return 2;
+    }
+    if opts.dry_run {
+        println!("  ioctl 0x53         guarded crossbar input0: 0x00000010 -> 0x00000011 -> 0x00000010");
+        return cmd_demux_core(opts);
+    }
+    let drv = match XcDrv::open_path(&opts.dev) {
+        Ok(drv) => drv,
+        Err(e) => { eprintln!("mkra: open crossbar device: {e}"); return 1; }
+    };
+    let before = match drv.mmr_read32(0x61f0) {
+        Ok(value) => value,
+        Err(e) => { eprintln!("mkra: read crossbar: {e}"); return 1; }
+    };
+    if before != 0x10 {
+        eprintln!("mkra: refuse: crossbar is 0x{before:08x}, expected 0x00000010");
+        return 1;
+    }
+    if let Err(e) = drv.set_tsi_crossbar_input0(source) {
+        eprintln!("mkra: crossbar change failed: {e}");
+        return 1;
+    }
+    let active = drv.mmr_read32(0x61f0);
+    let capture = if matches!(active, Ok(0x11)) {
+        cmd_demux_core(opts)
+    } else {
+        eprintln!("mkra: crossbar active readback failed/mismatched: {active:?}");
+        1
+    };
+    let restore = cmd_tsi_crossbar_restore();
+    if restore != 0 { return 1; }
+    capture
+}
+
+fn cmd_demux_core(opts: &Options) -> i32 {
     if opts.tsi_port > 7 {
         eprintln!("mkra: --tsi-port must be 0..7");
         return 2;

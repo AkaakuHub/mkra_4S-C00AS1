@@ -47,6 +47,7 @@ pub const GET_GRAPH: c_int = 0x86; // xc_get_graph_func                (32 B)
 pub const GET_TEMPERATURE: c_int = 0x64;
 const MMR_BASE: c_int = 0x19; // returns the open-time userspace MMR map (4 B)
 const TSI_CONFIG: c_int = 0x50; // xc_tsi_config_func                  (40 B)
+const TSI_CONFIG_EX: c_int = 0x53;
 const TSI_STATUS: c_int = 0x51; // xc_tsi_status_func                  (36 B)
 
 const SDEV_CREATE: c_int = 0x28;
@@ -878,6 +879,17 @@ impl XcDrv {
     pub fn configure_ts_recorder_physical_tsi(&self, port: u32) -> io::Result<()> {
         let mut req = ts_recorder_physical_tsi_request(port);
         unsafe { self.call(TSI_CONFIG, &mut req)? };
+        Ok(())
+    }
+
+    pub fn set_tsi_crossbar_input0(&self, source: u32) -> io::Result<()> {
+        if source > 1 {
+            return Err(io::Error::new(io::ErrorKind::InvalidInput, "TSI source must be 0 or 1"));
+        }
+        let mut req = [0u32; 11];
+        req[10] = source;
+        log_raw_words("TSI crossbar input0", &req);
+        unsafe { self.call(TSI_CONFIG_EX, &mut req)? };
         Ok(())
     }
 
