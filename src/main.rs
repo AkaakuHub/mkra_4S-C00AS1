@@ -13,6 +13,7 @@
 //!   dmd-tsout-base / dmd-tsout-tlv  switch bank7 73/75/7b/7d between the two
 //!            product-defined states (guarded, compare-before-write, read back)
 //!   tsi-mmr  read the live XCode6 TSI MMR/status without changing its state
+//!   fw-state  read the driver's firmware heartbeat tracker without changing it
 //!
 //! Read docs/ABI.md before
 //! changing behaviour on the device.
@@ -21,6 +22,7 @@ mod api;
 mod channels;
 mod cpld;
 mod findbuf;
+mod fw_state;
 mod graph;
 mod gr;
 mod gr_i2c;
@@ -66,6 +68,7 @@ USAGE:
   mkra probe [options]
   mkra dump  --buffer <handle> --out <path> [--seconds <n>] [--reader <handle>|--passive]
   mkra graph [--watch <n>] [--sniff]
+  mkra fw-state
   mkra peek  --phys <addr> [--len <n>]
   mkra tune  --freq <kHz> [--tsid <hex>] [--tuner-no <1..3>] [--input-port <n>]
   mkra tune  --fed <adbs|isdb-s> --freq <kHz> [--path <n>] [--tsid <hex>] [--dry-run]
@@ -338,6 +341,13 @@ fn main() {
         "probe" => cmd_probe(&opts),
         "dump" => cmd_dump(&opts),
         "graph" => cmd_graph(&opts),
+        "fw-state" => match fw_state::print() {
+            Ok(()) => 0,
+            Err(e) => {
+                eprintln!("mkra: firmware status: {e}");
+                1
+            }
+        },
         "peek" => cmd_peek(&opts),
         "tune" => cmd_tune(&opts),
         "fed-off" => cmd_fed_off(&opts),
