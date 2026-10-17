@@ -49,8 +49,8 @@ pub fn print_queue() -> io::Result<()> {
             u32::from_le_bytes([data[p], data[p + 1], data[p + 2], data[p + 3]])
         };
         println!(
-            "{index:02} {:08x} {:08x} {:08x} {:08x} {:08x} {:08x}",
-            word(0), word(0x1c), word(0x20), word(0x24), word(0x34), word(0x38)
+            "{index:02} {:08x} {:08x} {:08x} {:08x} proc={} {:08x} {:08x}",
+            word(0), word(0x1c), word(0x20), word(0x24), word(0x2c), word(0x34), word(0x38)
         );
     }
     Ok(())
