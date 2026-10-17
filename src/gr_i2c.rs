@@ -456,10 +456,12 @@ mod arm_linux {
             let sample = (|| -> io::Result<(bool, u8)> {
                 bus.write(0x16, 0x0a, &[0x80])?;
                 bus.write(0x16, 0x0b, &[0xe0])?;
-                if bus.read(0x16, 0x0a, 1)?[0] != 0x80
-                    || bus.read(0x16, 0x0b, 1)?[0] != 0xe0
-                {
-                    return Err(io::Error::other("HIZ write readback mismatch"));
+                let active1 = bus.read(0x16, 0x0a, 1)?[0];
+                let active2 = bus.read(0x16, 0x0b, 1)?[0];
+                if (active1, active2) != (0x80, 0xe0) {
+                    return Err(io::Error::other(format!(
+                        "HIZ write readback mismatch: {active1:02x}/{active2:02x}"
+                    )));
                 }
                 std::thread::sleep(Duration::from_secs(1));
                 drv.tsi_status(1)
