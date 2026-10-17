@@ -1,4 +1,5 @@
-use std::io;
+use std::fs::File;
+use std::io::{self, Read, Seek, SeekFrom};
 
 use crate::graph::{ksym, Kmem};
 
@@ -12,6 +13,8 @@ pub fn print() -> io::Result<()> {
 
     let state = kmem.u32(ctx + 0x46398)?;
     let mmr_base = kmem.u32(ctx)?;
+    let mmr_phys = kmem.u32(ctx + 0x20)?;
+    let mmr_len = kmem.u32(ctx + 0x24)?;
     let tracked_heartbeat = kmem.u32(ctx + 0x4639c)?;
     let stale_count = kmem.u32(ctx + 0x463a0)?;
     let last_check = kmem.u32(ctx + 0x463a4)?;
@@ -29,6 +32,19 @@ pub fn print() -> io::Result<()> {
     println!("  buffer_queue_capacity={buffer_queue_capacity}");
     println!("  buffer_queue_free_head={free_head:#010x} next={free_next:#010x}");
     println!("  buffer_queue_free_list_empty={}", free_next == free_head);
+    if mmr_base != 0xffee_0000 || mmr_phys != mmr_base || mmr_len != 0x20000 {
+        return Err(io::Error::other("unexpected XCode6 MMR mapping"));
+    }
+    let mut mem = File::open("/dev/mem")?;
+    let read_mmr = |mem: &mut File, offset: u64| -> io::Result<u32> {
+        mem.seek(SeekFrom::Start(u64::from(mmr_phys) + offset))?;
+        let mut bytes = [0u8; 4];
+        mem.read_exact(&mut bytes)?;
+        Ok(u32::from_le_bytes(bytes))
+    };
+    let ipc_cmd = read_mmr(&mut mem, 0x17104)?;
+    let ipc_ack = read_mmr(&mut mem, 0x1710c)?;
+    println!("  ipc_command_bits={ipc_cmd:#010x} ipc_ack_bits={ipc_ack:#010x}");
     Ok(())
 }
 
