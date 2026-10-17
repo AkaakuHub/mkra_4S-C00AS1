@@ -419,6 +419,11 @@ fn cmd_dmd_regs() -> i32 {
         print!(" {reg:02x}={value:02x}");
     }
     println!();
+    print!("isdbt page (i2c 0x16):");
+    for (reg, value) in regs.isdbt_page {
+        print!(" {reg:02x}={value:02x}");
+    }
+    println!();
 
     let framing = gr_i2c::classify_tsout(&regs.bank7);
     println!(
