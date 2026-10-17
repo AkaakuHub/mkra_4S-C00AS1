@@ -94,6 +94,7 @@ USAGE:
   mkra dmd-cc-select40
   mkra tuner-oneshot-clear --label <pseq|recommend>
   mkra tsi-mmr
+  mkra tsi1-baseline
   mkra temp [--watch <n>]
 
 SERVE OPTIONS:
@@ -369,6 +370,7 @@ fn main() {
         "tuner-oneshot-clear" => cmd_tuner_oneshot_clear(&opts),
         "isdbs-ts-exclusive" => cmd_isdbs_ts_exclusive(),
         "tsi-mmr" => cmd_tsi_mmr(&opts),
+        "tsi1-baseline" => cmd_tsi1_baseline(&opts),
         "temp" => cmd_temp(&opts),
         other => {
             eprintln!("mkra: unknown command `{other}`\n\nTry `mkra --help`.");
@@ -4181,6 +4183,60 @@ fn cmd_tsi_mmr(opts: &Options) -> i32 {
         }
     }
     println!("No configuration or graph write was issued.");
+    0
+}
+
+fn cmd_tsi1_baseline(opts: &Options) -> i32 {
+    let drv = match XcDrv::open_path(&opts.dev) {
+        Ok(drv) => drv,
+        Err(e) => {
+            eprintln!("mkra: cannot open {}: {e}", opts.dev);
+            return 1;
+        }
+    };
+    let before = [(0x6000, 0x0300_0000), (0x6008, 0x0300_0300), (0x600c, 0)];
+    for (offset, expected) in before {
+        match drv.mmr_read32(offset) {
+            Ok(value) if value == expected => {}
+            Ok(value) => {
+                eprintln!("mkra: TSI1 restore refused: MMR[{offset:#x}]={value:#010x}, expected {expected:#010x}");
+                return 1;
+            }
+            Err(e) => {
+                eprintln!("mkra: TSI1 restore preflight failed: {e}");
+                return 1;
+            }
+        }
+    }
+    match drv.tsi_status(1) {
+        Ok((false, _)) => {}
+        Ok((true, crc)) => {
+            eprintln!("mkra: TSI1 restore refused: TSI1 is locked, crc={crc:02x}");
+            return 1;
+        }
+        Err(e) => {
+            eprintln!("mkra: TSI1 status read failed: {e}");
+            return 1;
+        }
+    }
+    if let Err(e) = drv.restore_inactive_tsi1() {
+        eprintln!("mkra: TSI1 restore failed: {e}");
+        return 1;
+    }
+    let expected_after = [(0x6000, 0x0100_0000), (0x6008, 0x0100_0100), (0x600c, 0x0000_0200)];
+    for (offset, expected) in expected_after {
+        match drv.mmr_read32(offset) {
+            Ok(value) if value == expected => println!("MMR[{offset:#x}]={value:#010x}"),
+            Ok(value) => {
+                eprintln!("mkra: TSI1 restore readback mismatch: MMR[{offset:#x}]={value:#010x}, expected {expected:#010x}");
+                return 1;
+            }
+            Err(e) => {
+                eprintln!("mkra: TSI1 restore readback failed: {e}");
+                return 1;
+            }
+        }
+    }
     0
 }
 
