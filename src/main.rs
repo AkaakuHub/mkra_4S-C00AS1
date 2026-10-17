@@ -2874,8 +2874,14 @@ fn cmd_demux(opts: &Options) -> i32 {
             let (lock, crc) = drv
                 .tsi_status(opts.tsi_port)
                 .map_err(|e| format!("read TSI{} status at {stage}: {e}", opts.tsi_port))?;
+            let config = drv
+                .mmr_read32(0x6000)
+                .map_err(|e| format!("read TSI config at {stage}: {e}"))?;
+            let status = drv
+                .mmr_read32(0x6004)
+                .map_err(|e| format!("read TSI lock bits at {stage}: {e}"))?;
             eprintln!(
-                "demux: TSI{} status {stage}: lock={} crc={crc:02x}",
+                "demux: TSI{} status {stage}: lock={} crc={crc:02x} config={config:08x} lock_bits={status:08x}",
                 opts.tsi_port,
                 u8::from(lock)
             );
