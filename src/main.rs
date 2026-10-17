@@ -68,6 +68,7 @@ USAGE:
   mkra probe [options]
   mkra dump  --buffer <handle> --out <path> [--seconds <n>] [--reader <handle>|--passive]
   mkra graph [--watch <n>] [--sniff]
+  mkra graph-status
   mkra fw-state
   mkra peek  --phys <addr> [--len <n>]
   mkra tune  --freq <kHz> [--tsid <hex>] [--tuner-no <1..3>] [--input-port <n>]
@@ -341,6 +342,7 @@ fn main() {
         "probe" => cmd_probe(&opts),
         "dump" => cmd_dump(&opts),
         "graph" => cmd_graph(&opts),
+        "graph-status" => cmd_graph_status(&opts),
         "fw-state" => match fw_state::print() {
             Ok(()) => 0,
             Err(e) => {
@@ -4198,6 +4200,41 @@ fn cmd_tsi_mmr(opts: &Options) -> i32 {
 ///
 /// This is the safe replacement for `probe --scan`: handles come from the
 /// driver's own tables, so no invented value ever reaches an ioctl.
+fn cmd_graph_status(opts: &Options) -> i32 {
+    let graph = match graph::Graph::read() {
+        Ok(graph) => graph,
+        Err(e) => {
+            eprintln!("mkra: cannot read driver graph: {e}");
+            return 1;
+        }
+    };
+    let Some((count, _, rows)) = graph.tables.get("device") else {
+        eprintln!("mkra: graph has no device table");
+        return 1;
+    };
+    let drv = match XcDrv::open_path(&opts.dev) {
+        Ok(drv) => drv,
+        Err(e) => {
+            eprintln!("mkra: cannot open driver: {e}");
+            return 1;
+        }
+    };
+    println!("XCode6 device states (read-only):");
+    for row in rows.iter().filter(|row| row.index < *count as usize) {
+        let Some(&handle) = row.words.first() else {
+            continue;
+        };
+        if handle == 0 {
+            continue;
+        }
+        match drv.device_status(handle) {
+            Ok(status) => println!("  device={handle:#x} status={status:#x}"),
+            Err(e) => println!("  device={handle:#x} error={e}"),
+        }
+    }
+    0
+}
+
 fn cmd_graph(opts: &Options) -> i32 {
     let g = match graph::Graph::read() {
         Ok(g) => g,
