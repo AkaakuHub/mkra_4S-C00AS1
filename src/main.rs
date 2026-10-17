@@ -2575,6 +2575,8 @@ const GATE5B9_FW_LOG: &str = "/tmp/fwlog.txt";
 const GATE5B9_SF_RING_SIZE: usize = 0x7e000;
 const GATE5B9_SF_PHYS_START: u32 = 0x5000_0000;
 const GATE5B9_SF_PHYS_END: u32 = 0x5800_0000;
+const GATE5B9_TS_RING_BASE: u32 = 0x2803_4000;
+const GATE5B9_TS_RING_SIZE: usize = 0x468000;
 const GATE5B10_PDEV_PHYS_START: u32 = 0x1d00_0000;
 const GATE5B10_PDEV_PHYS_END: u32 = 0x2000_0000;
 const GATE5B10_MMR_OFFSETS: [u32; 11] = [
@@ -2642,18 +2644,22 @@ fn read_fwlog_since(start: u64) -> Result<String, String> {
     Ok(text)
 }
 
-fn wait_for_gate5b9_sf_ring(log_start: u64) -> Result<(u32, usize), String> {
-    let deadline = Instant::now() + Duration::from_secs(2);
+fn wait_for_gate5b9_sf_ring(log_start: u64, pat_section: bool) -> Result<(u32, usize), String> {
+    let deadline = Instant::now() + Duration::from_secs(12);
     loop {
         if let Ok(text) = read_fwlog_since(log_start) {
             if let Some((base, size)) = parse_latest_sf_ring(&text) {
-                validate_gate5b9_sf_ring(base, size)?;
+                if pat_section {
+                    validate_gate5b9_sf_ring(base, size)?;
+                } else if (base, size) != (GATE5B9_TS_RING_BASE, GATE5B9_TS_RING_SIZE) {
+                    return Err(format!("refuse unexpected full-TS SF ring: base={base:#010x} size={size:#x}"));
+                }
                 return Ok((base, size));
             }
         }
         if Instant::now() >= deadline {
             return Err(format!(
-                "firmware SF ring was not reported in {GATE5B9_FW_LOG} within 2 s"
+                "firmware SF ring was not reported in {GATE5B9_FW_LOG} within 12 s"
             ));
         }
         std::thread::sleep(Duration::from_millis(20));
@@ -2773,8 +2779,8 @@ fn cmd_demux(opts: &Options) -> i32 {
         eprintln!("mkra: --ready-before-filter requires --pat-section");
         return 2;
     }
-    if opts.demux_observe_sf_ring && (!opts.demux_pat_section || opts.tsi_port != 0) {
-        eprintln!("mkra: --observe-sf-ring requires --pat-section and --tsi-port 0");
+    if opts.demux_observe_sf_ring && opts.tsi_port != 0 {
+        eprintln!("mkra: --observe-sf-ring requires --tsi-port 0");
         return 2;
     }
     if opts.demux_observe_tsi_route && opts.tsi_port != 0 {
@@ -2813,7 +2819,7 @@ fn cmd_demux(opts: &Options) -> i32 {
             println!("  read-only resource snapshots: res_tool -l -A -a -t -s after run/reader/filter/ready/cleanup");
         }
         if opts.demux_observe_sf_ring {
-            println!("  read-only Gate 5B9: parse {GATE5B9_FW_LOG} setup_sf_ring and compare its 0x7e000-byte physical ring before/after capture");
+            println!("  read-only Gate 5B9: parse {GATE5B9_FW_LOG} setup_sf_ring and compare its physical ring before/after capture");
         }
         if opts.demux_observe_tsi_route {
             println!("  read-only Gate 5B10: volatile-load MMR TSI/crossbar registers and firmware DEMUX pdev route/source/flags at fixed lifecycle boundaries");
@@ -3129,7 +3135,7 @@ fn cmd_demux(opts: &Options) -> i32 {
             }
         };
         let sf_before = if opts.demux_observe_sf_ring {
-            let (base, size) = wait_for_gate5b9_sf_ring(log_start)?;
+            let (base, size) = wait_for_gate5b9_sf_ring(log_start, opts.demux_pat_section)?;
             let bytes = graph::ObjReader::new(Arc::clone(&drv))
                 .read_phys(base, size)
                 .map_err(|e| format!("read firmware SF ring before capture: {e}"))?;
