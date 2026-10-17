@@ -30,3 +30,28 @@ pub fn print() -> io::Result<()> {
     println!("  buffer_queue_free_list_empty={}", free_next == free_head);
     Ok(())
 }
+
+pub fn print_queue() -> io::Result<()> {
+    let mut kmem = Kmem::open()?;
+    let ctx = kmem.u32(ksym("gps_XCode")?)?;
+    if ctx < 0x8000_0000 || kmem.u32(ctx + 0x463b0)? != 100 {
+        return Err(io::Error::other("unexpected XCode6 diagnostic queue layout"));
+    }
+    let data = kmem.read(ctx + 0x463b8, 100 * 0x3c)?;
+    if data.len() != 100 * 0x3c {
+        return Err(io::Error::other("short XCode6 diagnostic queue read"));
+    }
+    println!("XCode6 diagnostic slots (read-only):");
+    for index in 0..100 {
+        let base = index * 0x3c;
+        let word = |offset: usize| {
+            let p = base + offset;
+            u32::from_le_bytes([data[p], data[p + 1], data[p + 2], data[p + 3]])
+        };
+        println!(
+            "{index:02} {:08x} {:08x} {:08x} {:08x} {:08x} {:08x}",
+            word(0), word(0x1c), word(0x20), word(0x24), word(0x34), word(0x38)
+        );
+    }
+    Ok(())
+}

@@ -70,6 +70,7 @@ USAGE:
   mkra graph [--watch <n>] [--sniff]
   mkra graph-status
   mkra fw-state
+  mkra fw-queue
   mkra peek  --phys <addr> [--len <n>]
   mkra tune  --freq <kHz> [--tsid <hex>] [--tuner-no <1..3>] [--input-port <n>]
   mkra tune  --fed <adbs|isdb-s> --freq <kHz> [--path <n>] [--tsid <hex>] [--dry-run]
@@ -347,6 +348,13 @@ fn main() {
             Ok(()) => 0,
             Err(e) => {
                 eprintln!("mkra: firmware status: {e}");
+                1
+            }
+        },
+        "fw-queue" => match fw_state::print_queue() {
+            Ok(()) => 0,
+            Err(e) => {
+                eprintln!("mkra: firmware queue: {e}");
                 1
             }
         },
