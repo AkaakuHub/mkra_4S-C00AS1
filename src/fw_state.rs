@@ -14,12 +14,12 @@ pub fn print() -> io::Result<()> {
     let tracked_heartbeat = kmem.u32(ctx + 0x4639c)?;
     let stale_count = kmem.u32(ctx + 0x463a0)?;
     let last_check = kmem.u32(ctx + 0x463a4)?;
-    let buffer_queue_count = kmem.u32(ctx + 0x463b0)?;
+    let buffer_queue_capacity = kmem.u32(ctx + 0x463b0)?;
     println!("XCode6 firmware status (read-only):");
     println!("  ctx={ctx:#010x} sg_av={sg_av:#010x}");
     println!("  get_fw_state flag={state} stale_count={stale_count}");
     println!("  heartbeat tracked={tracked_heartbeat:#010x}");
     println!("  last_check={last_check:#010x}");
-    println!("  buffer_queue_count={buffer_queue_count}");
+    println!("  buffer_queue_capacity={buffer_queue_capacity}");
     Ok(())
 }
