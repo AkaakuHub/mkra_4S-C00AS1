@@ -79,7 +79,7 @@ USAGE:
   mkra cpld --reg <0..4> [--set <hex> --expect <hex>]
   mkra tsrec --out <path> [--seconds <n>] [--tsi-port <n>]
   mkra demux --out <path> [--seconds <n>] [--tsi-port <n>] [--tsi-logical-port <0|1>] [--tsi-explicit-route] [--tsi-packet <188|192|204|130>] [--tsi-use-sync] [--tsi-parallel]
-             [--pid <0..8191>|--pat-section] [--dry-run]
+             [--pid <0..8191>|--pat-section] [--run-after-filter] [--dry-run]
   mkra remux4k --out <path> [--seconds <n>] [--tsid <hex>] [--dry-run]
   mkra tune4k  --sid <101|102|141|151|161|171|181|211|221|231> [--oid <n>] [--dry-run]
   mkra gr (--channel <13..62>|--freq <kHz>) [--if-hz <Hz>] [--dry-run]
@@ -883,6 +883,7 @@ struct Options {
     demux_observe_resources: bool,
     demux_observe_sf_ring: bool,
     demux_observe_tsi_route: bool,
+    demux_run_after_filter: bool,
     demux_ready_before_filter: bool,
     demux_explicit_route: bool,
     demux_logical_port: u32,
@@ -988,6 +989,7 @@ impl Options {
             demux_observe_resources: false,
             demux_observe_sf_ring: false,
             demux_observe_tsi_route: false,
+            demux_run_after_filter: false,
             demux_ready_before_filter: false,
             demux_explicit_route: false,
             demux_logical_port: 0,
@@ -1060,6 +1062,7 @@ impl Options {
                 "--observe-resources" => o.demux_observe_resources = true,
                 "--observe-sf-ring" => o.demux_observe_sf_ring = true,
                 "--observe-tsi-route" => o.demux_observe_tsi_route = true,
+                "--run-after-filter" => o.demux_run_after_filter = true,
                 "--ready-before-filter" => o.demux_ready_before_filter = true,
                 "--tsi-explicit-route" => o.demux_explicit_route = true,
                 "--tsi-logical-port" => o.demux_logical_port = parse_u32(&value()?, a)?,
@@ -2838,6 +2841,9 @@ fn cmd_demux(opts: &Options) -> i32 {
         if !opts.demux_ready_before_filter {
             println!("  ioctl 0x00010035   set ready: BUFFER (value argument)");
         }
+        if opts.demux_run_after_filter {
+            println!("  ioctl 0x0001002a   retry run after filter and buffer ready: [DEVICE,1,0]");
+        }
         println!("  read: 0x3b / commit: 0x3c");
         if opts.demux_no_filter {
             println!("  cleanup: destroy reader -> disconnect -> verify writer/readers=0 -> force-reset/destroy buffer -> stop/destroy DEMUX -> stop pipeline -> destroy AV_SYNC/pipeline");
@@ -3102,6 +3108,14 @@ fn cmd_demux(opts: &Options) -> i32 {
                 std::thread::sleep(Duration::from_millis(delay_ms));
                 log_tsi(label)?;
                 log_ring(label, buffer)?;
+            }
+        }
+        if opts.demux_run_after_filter {
+            drv.run_product_demux(device)
+                .map_err(|e| format!("run DEMUX after filter and buffer ready: {e}"))?;
+            log_tsi("after second DEMUX run")?;
+            if opts.demux_observe_tsi_route {
+                log_gate5b10_route_snapshot(&drv, "after_second_demux_run", observed_pdev)?;
             }
         }
         let status_before = match drv.sbuf_status_raw(buffer) {
