@@ -41,14 +41,15 @@ pub struct DmdOutputRegs {
     pub bank0: [(u8, u8); 6],
     /// `(register, value)` for I2C 7-bit `0x17` (SC1501A bank 7).
     pub bank7: [(u8, u8); 9],
-    pub isdbt_page: [(u8, u8); 3],
+    pub isdbt_page: [(u8, u8); 9],
 }
 
 /// Bank-0 registers sampled by [`DmdOutputRegs`], in report order.
 pub const DMD_BANK0_REGS: [u8; 6] = [0x0b, 0x0c, 0x13, 0x16, 0x18, 0xcc];
 /// Bank-7 registers sampled by [`DmdOutputRegs`], in report order.
 pub const DMD_BANK7_REGS: [u8; 9] = [0x0a, 0x72, 0x73, 0x74, 0x75, 0x76, 0x7b, 0x7d, 0x8d];
-pub const DMD_ISDBT_ROUTE_REGS: [u8; 3] = [0x05, 0x06, 0x07];
+pub const DMD_ISDBT_ROUTE_REGS: [u8; 9] =
+    [0x05, 0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b, 0x0d, 0x0f];
 
 /// Bank-7 bytes that `regset_TLV_SPI_1BIT` + `DMD_set_tsout(systype=0x0d)`
 /// leave behind, and that no ISDB-S or ISDB-T path rewrites.
@@ -416,7 +417,7 @@ mod arm_linux {
             for (slot, reg) in bank7.iter_mut().zip(DMD_BANK7_REGS) {
                 *slot = (reg, bus.read(0x17, reg, 1)?[0]);
             }
-            let mut isdbt_page = [(0u8, 0u8); 3];
+            let mut isdbt_page = [(0u8, 0u8); 9];
             for (slot, reg) in isdbt_page.iter_mut().zip(DMD_ISDBT_ROUTE_REGS) {
                 *slot = (reg, bus.read(0x16, reg, 1)?[0]);
             }
