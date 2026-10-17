@@ -629,7 +629,7 @@ fn cmd_sc1501a_snapshot(opts: &Options) -> i32 {
             }
             match snapshot::procmem::maps(pid) {
                 Ok(maps) => {
-                    for addr in [snapshot::RECOMMEND_FLAGS, snapshot::PSEQ_FLAGS, snapshot::CONTEXT_BASE] {
+                    for addr in [snapshot::ISDBS_INIT_FLAG, snapshot::RECOMMEND_FLAGS, snapshot::PSEQ_FLAGS, snapshot::CONTEXT_BASE] {
                         println!(
                             "tuner.map.{addr:06x}.writable={}",
                             u8::from(snapshot::procmem::is_writable(&maps, addr))
@@ -647,6 +647,7 @@ fn cmd_sc1501a_snapshot(opts: &Options) -> i32 {
                     Err(e) => format!("ERR:{e}"),
                 }
             };
+            println!("tuner.isdbs_init_flag={}", word(snapshot::ISDBS_INIT_FLAG));
             for i in 0..4u32 {
                 println!("tuner.recommend_flag[{i}]={}", word(snapshot::RECOMMEND_FLAGS + i * 4));
                 println!("tuner.pseq_flag[{i}]={}", word(snapshot::PSEQ_FLAGS + i * 4));

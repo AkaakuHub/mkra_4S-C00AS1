@@ -65,6 +65,7 @@ pub const WATCHLIST: [(u8, u8, &str); 42] = [
 /// `tuner` `.bss` addresses. Absolute: the ELF is ET_EXEC, link base `0x8000`.
 pub const RECOMMEND_FLAGS: u32 = 0x0003_c7e8;
 pub const PSEQ_FLAGS: u32 = 0x0003_c7f8;
+pub const ISDBS_INIT_FLAG: u32 = 0x0003_7734;
 pub const CONTEXT_BASE: u32 = 0x0003_c9e0;
 pub const CONTEXT_STRIDE: u32 = 0x0c78;
 
