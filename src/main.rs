@@ -78,7 +78,7 @@ USAGE:
   mkra fem-dev --path <1..6> (--dev <hex> | --disconnect) [--dry-run]
   mkra cpld --reg <0..4> [--set <hex> --expect <hex>]
   mkra tsrec --out <path> [--seconds <n>] [--tsi-port <n>]
-  mkra demux --out <path> [--seconds <n>] [--tsi-port <n>] [--tsi-explicit-route] [--tsi-packet <188|192|204|130>] [--tsi-use-sync]
+  mkra demux --out <path> [--seconds <n>] [--tsi-port <n>] [--tsi-logical-port <0|1>] [--tsi-explicit-route] [--tsi-packet <188|192|204|130>] [--tsi-use-sync]
              [--pid <0..8191>|--pat-section] [--dry-run]
   mkra remux4k --out <path> [--seconds <n>] [--tsid <hex>] [--dry-run]
   mkra tune4k  --sid <101|102|141|151|161|171|181|211|221|231> [--oid <n>] [--dry-run]
@@ -857,6 +857,7 @@ struct Options {
     demux_observe_tsi_route: bool,
     demux_ready_before_filter: bool,
     demux_explicit_route: bool,
+    demux_logical_port: u32,
     /// remux4k: run only the read-only discovery step and print what it found.
     remux4k_discover_only: bool,
     /// remux4k: also inject a locally generated PAT/PMT into the output.
@@ -959,6 +960,7 @@ impl Options {
             demux_observe_tsi_route: false,
             demux_ready_before_filter: false,
             demux_explicit_route: false,
+            demux_logical_port: 0,
             remux4k_discover_only: false,
             remux4k_inject_psi: false,
             remux4k_kick: false,
@@ -1030,6 +1032,7 @@ impl Options {
                 "--observe-tsi-route" => o.demux_observe_tsi_route = true,
                 "--ready-before-filter" => o.demux_ready_before_filter = true,
                 "--tsi-explicit-route" => o.demux_explicit_route = true,
+                "--tsi-logical-port" => o.demux_logical_port = parse_u32(&value()?, a)?,
                 "--discover-only" => o.remux4k_discover_only = true,
                 "--inject-psi" => o.remux4k_inject_psi = true,
                 "--kick" => o.remux4k_kick = true,
@@ -2704,6 +2707,10 @@ fn cmd_demux(opts: &Options) -> i32 {
         eprintln!("mkra: --tsi-port must be 0..7");
         return 2;
     }
+    if opts.demux_logical_port > 1 || (opts.demux_explicit_route && opts.demux_logical_port != 0) {
+        eprintln!("mkra: --tsi-logical-port must be 0 or 1 and cannot be combined with --tsi-explicit-route");
+        return 2;
+    }
     if opts.pids.len() > 1 || opts.pids.first().is_some_and(|&pid| pid > 0x1fff) {
         eprintln!("mkra: demux accepts at most one --pid in 0..8191");
         return 2;
@@ -2759,7 +2766,7 @@ fn cmd_demux(opts: &Options) -> i32 {
         if opts.demux_explicit_route {
             println!("  ioctl 0x01f4002a   explicit TSI{} route: [DEVICE,0,0x80000000,{}]", opts.tsi_port, opts.tsi_port);
         } else {
-            println!("  ioctl 0x01f4002a   product direct logical TSI route: [DEVICE,0,0,0]");
+            println!("  ioctl 0x01f4002a   direct logical TSI route: [DEVICE,{},0,0]", opts.demux_logical_port);
         }
         println!("  ioctl 0x0001002a   run: [DEVICE,1,0]");
         if opts.demux_observe_resources {
@@ -2899,13 +2906,13 @@ fn cmd_demux(opts: &Options) -> i32 {
             observed_pdev = Some(wait_for_gate5b10_pdev()?);
             log_gate5b10_route_snapshot(&drv, "before_demux_route", observed_pdev)?;
         }
-        // `abs` keeps the TSD route m_port at zero for both live spro/system
-        // values.  The physical setup port is a separate layer: BS system=2
-        // maps to physical TSI1, while this product route remains port 0.
+        // The product's observed 4K path uses logical port 0. Its 2K
+        // mapping is unobserved, so keep this selector independent of the
+        // physical TSI port for a bounded comparison.
         if opts.demux_explicit_route {
             drv.config_tsi_explicit_route(device, opts.tsi_port)
         } else {
-            drv.config_tsi_product_route(device)
+            drv.config_tsi_product_route(device, opts.demux_logical_port)
         }
             .map_err(|e| format!("configure DEMUX TSD route: {e}"))?;
         log_tsi("after DEMUX route")?;

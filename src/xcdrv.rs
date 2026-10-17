@@ -118,8 +118,8 @@ fn log_raw_words(label: &str, words: &[u32]) {
 /// Therefore the product request is the direct logical-route form below, not
 /// the ASI/crossbar-selector form with bit 31.  Its logical m_port value must
 /// not be equated with the separately configured physical TSI port.
-const fn product_tsi_request(device: u32) -> [u32; 4] {
-    [device, 0, 0, 0]
+const fn product_tsi_request(device: u32, logical_port: u32) -> [u32; 4] {
+    [device, logical_port, 0, 0]
 }
 
 const fn explicit_tsi_request(device: u32, port: u32) -> [u32; 4] {
@@ -879,8 +879,8 @@ impl XcDrv {
         Ok(())
     }
 
-    pub fn config_tsi_product_route(&self, device: u32) -> io::Result<()> {
-        let mut req = product_tsi_request(device);
+    pub fn config_tsi_product_route(&self, device: u32, logical_port: u32) -> io::Result<()> {
+        let mut req = product_tsi_request(device, logical_port);
         log_raw_words("DEMUX direct-route request", &req);
         unsafe { self.call(SDEV_CONFIG_TSI, &mut req)? };
         Ok(())
@@ -1264,8 +1264,8 @@ mod tests {
 
     #[test]
     fn product_tsi_route_is_direct_logical_port_zero() {
-        assert_eq!(product_tsi_request(0x0c), [0x0c, 0, 0, 0]);
-        assert_eq!(product_tsi_request(0x12), [0x12, 0, 0, 0]);
+        assert_eq!(product_tsi_request(0x0c, 0), [0x0c, 0, 0, 0]);
+        assert_eq!(product_tsi_request(0x12, 1), [0x12, 1, 0, 0]);
     }
 
     #[test]
