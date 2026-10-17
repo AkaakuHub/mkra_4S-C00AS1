@@ -1,7 +1,7 @@
-use std::fs::File;
-use std::io::{self, Read, Seek, SeekFrom};
+use std::io;
 
 use crate::graph::{ksym, Kmem};
+use crate::xcdrv::{XcDrv, DEV_PATH};
 
 pub fn print() -> io::Result<()> {
     let mut kmem = Kmem::open()?;
@@ -35,15 +35,9 @@ pub fn print() -> io::Result<()> {
     if mmr_base != 0xffee_0000 || mmr_phys != mmr_base || mmr_len != 0x20000 {
         return Err(io::Error::other("unexpected XCode6 MMR mapping"));
     }
-    let mut mem = File::open("/dev/mem")?;
-    let read_mmr = |mem: &mut File, offset: u64| -> io::Result<u32> {
-        mem.seek(SeekFrom::Start(u64::from(mmr_phys) + offset))?;
-        let mut bytes = [0u8; 4];
-        mem.read_exact(&mut bytes)?;
-        Ok(u32::from_le_bytes(bytes))
-    };
-    let ipc_cmd = read_mmr(&mut mem, 0x17104)?;
-    let ipc_ack = read_mmr(&mut mem, 0x1710c)?;
+    let drv = XcDrv::open_path(DEV_PATH)?;
+    let ipc_cmd = drv.mmr_read32(0x17104)?;
+    let ipc_ack = drv.mmr_read32(0x1710c)?;
     println!("  ipc_command_bits={ipc_cmd:#010x} ipc_ack_bits={ipc_ack:#010x}");
     Ok(())
 }
