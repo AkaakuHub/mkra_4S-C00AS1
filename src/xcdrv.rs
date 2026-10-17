@@ -138,7 +138,7 @@ const fn ts_recorder_tsi_request(device: u32, port: u32) -> [u32; 4] {
 
 /// Physical TSI setup issued by `abs` before it creates its MPEG-TS demux.
 ///
-/// `abs:0x2874e8` builds `tsd_configure_t {enable=1, parallel=0, packet=0,
+/// `abs:0x28777c..0x2877da` builds `tsd_configure_t {enable=1, parallel=0, packet=0,
 /// use_sync=0, negative_edge=1, active_high=1, keep_null=1}` and calls
 /// `setup_tsi_port`. The caller's spro/system discriminator maps system 0 to
 /// physical TSI0 and system 2 (BS/CS 2K) to physical TSI1 before this helper.
