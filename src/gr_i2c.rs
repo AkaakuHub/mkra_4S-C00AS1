@@ -617,6 +617,8 @@ mod arm_linux {
                 return Err(io::Error::other(format!("ISDB-S is not locked: {lock:02x}")));
             }
             let changes = [
+                (0x16, 0x08, 0x01, 0xff),
+                (0x16, 0x09, 0x11, 0x00),
                 (0x16, 0x0a, 0xff, 0x80),
                 (0x16, 0x0b, 0xff, 0xe0),
                 (0x16, 0x05, 0x00, 0x0c),
@@ -651,7 +653,7 @@ mod arm_linux {
                         )));
                     }
                 }
-                eprintln!("isdbs serial route active; capturing with all 8 register writes applied");
+                eprintln!("isdbs serial route active; capturing with all 10 register writes applied");
                 capture()
             })();
             let mut restore_error = None;
