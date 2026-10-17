@@ -44,7 +44,7 @@ mod xcdrv;
 // platform entropy source, and this binary targets a 2012-era 3.10 kernel
 // that predates `getrandom(2)`. Ten channels make ordering free anyway.
 use std::collections::BTreeMap;
-use std::io::{self, Write};
+use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::net::TcpListener;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::Arc;
@@ -2568,7 +2568,7 @@ fn cmd_gr_off() -> i32 {
     }
 }
 
-const GATE5B9_FW_LOG: &str = "/tmp/mt/fwlog.txt";
+const GATE5B9_FW_LOG: &str = "/tmp/fwlog.txt";
 const GATE5B9_SF_RING_SIZE: usize = 0x7e000;
 const GATE5B9_SF_PHYS_START: u32 = 0x5000_0000;
 const GATE5B9_SF_PHYS_END: u32 = 0x5800_0000;
@@ -2625,10 +2625,24 @@ fn validate_gate5b9_sf_ring(base: u32, size: usize) -> Result<(), String> {
     Ok(())
 }
 
-fn wait_for_gate5b9_sf_ring() -> Result<(u32, usize), String> {
+fn read_fwlog_since(start: u64) -> Result<String, String> {
+    let mut file = std::fs::File::open(GATE5B9_FW_LOG)
+        .map_err(|e| format!("open firmware log: {e}"))?;
+    if file.metadata().map_err(|e| format!("stat firmware log: {e}"))?.len() < start {
+        return Err("firmware log was truncated during capture".to_string());
+    }
+    file.seek(SeekFrom::Start(start))
+        .map_err(|e| format!("seek firmware log: {e}"))?;
+    let mut text = String::new();
+    file.read_to_string(&mut text)
+        .map_err(|e| format!("read firmware log: {e}"))?;
+    Ok(text)
+}
+
+fn wait_for_gate5b9_sf_ring(log_start: u64) -> Result<(u32, usize), String> {
     let deadline = Instant::now() + Duration::from_secs(2);
     loop {
-        if let Ok(text) = std::fs::read_to_string(GATE5B9_FW_LOG) {
+        if let Ok(text) = read_fwlog_since(log_start) {
             if let Some((base, size)) = parse_latest_sf_ring(&text) {
                 validate_gate5b9_sf_ring(base, size)?;
                 return Ok((base, size));
@@ -2658,10 +2672,10 @@ fn parse_latest_demux_pdev(text: &str) -> Option<u32> {
     })
 }
 
-fn wait_for_gate5b10_pdev() -> Result<u32, String> {
+fn wait_for_gate5b10_pdev(log_start: u64) -> Result<u32, String> {
     let deadline = Instant::now() + Duration::from_secs(2);
     loop {
-        if let Ok(text) = std::fs::read_to_string(GATE5B9_FW_LOG) {
+        if let Ok(text) = read_fwlog_since(log_start) {
             if let Some(pdev) = parse_latest_demux_pdev(&text) {
                 if pdev & 0xff != 0
                     || pdev < GATE5B10_PDEV_PHYS_START
@@ -2760,12 +2774,8 @@ fn cmd_demux(opts: &Options) -> i32 {
         eprintln!("mkra: --observe-sf-ring requires --pat-section and --tsi-port 0");
         return 2;
     }
-    if opts.demux_observe_tsi_route
-        && (!opts.demux_observe_sf_ring || !opts.demux_pat_section || opts.tsi_port != 0)
-    {
-        eprintln!(
-            "mkra: --observe-tsi-route requires --observe-sf-ring, --pat-section and --tsi-port 0"
-        );
+    if opts.demux_observe_tsi_route && opts.tsi_port != 0 {
+        eprintln!("mkra: --observe-tsi-route requires --tsi-port 0");
         return 2;
     }
     let demux_pid = if opts.demux_pat_section {
@@ -2891,6 +2901,13 @@ fn cmd_demux(opts: &Options) -> i32 {
     };
     let capture = (|| -> Result<(u64, Vec<u8>), String> {
         let mut observed_pdev: Option<u32> = None;
+        let log_start = if opts.demux_observe_tsi_route || opts.demux_observe_sf_ring {
+            std::fs::metadata(GATE5B9_FW_LOG)
+                .map_err(|e| format!("firmware log must be active: {e}"))?
+                .len()
+        } else {
+            0
+        };
         let log_tsi = |stage: &str| -> Result<(), String> {
             let (lock, crc) = drv
                 .tsi_status(opts.tsi_port)
@@ -2936,7 +2953,7 @@ fn cmd_demux(opts: &Options) -> i32 {
         drv.set_pipeline(device, pipeline)
             .map_err(|e| format!("set DEMUX pipeline: {e}"))?;
         if opts.demux_observe_tsi_route {
-            observed_pdev = Some(wait_for_gate5b10_pdev()?);
+            observed_pdev = Some(wait_for_gate5b10_pdev(log_start)?);
             log_gate5b10_route_snapshot(&drv, "before_demux_route", observed_pdev)?;
         }
         // The product's observed 4K path uses logical port 0. Its 2K
@@ -3098,7 +3115,7 @@ fn cmd_demux(opts: &Options) -> i32 {
             }
         };
         let sf_before = if opts.demux_observe_sf_ring {
-            let (base, size) = wait_for_gate5b9_sf_ring()?;
+            let (base, size) = wait_for_gate5b9_sf_ring(log_start)?;
             let bytes = graph::ObjReader::new(Arc::clone(&drv))
                 .read_phys(base, size)
                 .map_err(|e| format!("read firmware SF ring before capture: {e}"))?;
