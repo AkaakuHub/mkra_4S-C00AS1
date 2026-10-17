@@ -85,6 +85,7 @@ USAGE:
   mkra gr (--channel <13..62>|--freq <kHz>) [--if-hz <Hz>] [--dry-run]
   mkra gr-off
   mkra isdbs-status
+  mkra isdbs-tmcc-tsids
   mkra isdbs-ts-exclusive
   mkra dmd-regs
   mkra dmd-hiz-probe
@@ -373,6 +374,7 @@ fn main() {
         "gr" => cmd_gr(&opts),
         "gr-off" => cmd_gr_off(),
         "isdbs-status" => cmd_isdbs_status(),
+        "isdbs-tmcc-tsids" => cmd_isdbs_tmcc_tsids(),
         "dmd-regs" => cmd_dmd_regs(),
         "dmd-hiz-probe" => cmd_dmd_hiz_probe(false),
         "dmd-doset-probe" => cmd_dmd_doset_probe(false, false),
@@ -419,6 +421,25 @@ fn cmd_isdbs_status() -> i32 {
         }
         Err(e) => {
             eprintln!("mkra: ISDB-S lock read failed: {e}");
+            1
+        }
+    }
+}
+
+fn cmd_isdbs_tmcc_tsids() -> i32 {
+    match gr_i2c::read_isdbs_tmcc_tsids() {
+        Ok(result) => {
+            println!(
+                "ISDB-S lock before={:02x} after={:02x}; requested TSID={:04x}",
+                result.lock_before, result.lock_after, result.requested
+            );
+            for (index, tsid) in result.tsids.iter().enumerate() {
+                println!("TMCC TSID[{index}]={tsid:04x}");
+            }
+            0
+        }
+        Err(e) => {
+            eprintln!("mkra: ISDB-S TMCC TSID read failed: {e}");
             1
         }
     }

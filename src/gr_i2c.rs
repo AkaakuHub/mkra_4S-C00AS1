@@ -20,6 +20,13 @@ pub struct IsdbsStatus {
     pub ts_serial: u8,
 }
 
+pub struct IsdbsTmccTsids {
+    pub lock_before: u8,
+    pub lock_after: u8,
+    pub requested: u16,
+    pub tsids: [u16; 8],
+}
+
 /// Result of the one-byte ISDB-S/TLV output-mode exclusion repair.
 pub struct IsdbsTsExclusiveResult {
     pub before: u8,
@@ -200,7 +207,7 @@ pub fn classify_tsout(regs: &[(u8, u8)]) -> TsoutFraming {
 #[cfg(all(target_os = "linux", target_arch = "arm"))]
 mod arm_linux {
     use super::{
-        is_isdbt_locked, DmdOutputRegs, DosetProbeResult, HizProbeResult, IsdbsStatus, IsdbsTsExclusiveResult, TsoutRestoreResult,
+        is_isdbt_locked, DmdOutputRegs, DosetProbeResult, HizProbeResult, IsdbsStatus, IsdbsTmccTsids, IsdbsTsExclusiveResult, TsoutRestoreResult,
         TuneResult, Write, DMD_BANK0_REGS, DMD_BANK7_REGS, DMD_ISDBT_ROUTE_REGS,
     };
     use crate::i2c_lock::I2c0Guard;
@@ -405,6 +412,43 @@ mod arm_linux {
                 ts_pin: bus.read(0x10, 0x0b, 1)?[0],
                 ts_serial: bus.read(0x10, 0xcc, 1)?[0],
             })
+        })();
+        let release = guard.release();
+        match (result, release) {
+            (Err(e), _) => Err(e),
+            (Ok(_), Err(e)) => Err(e),
+            (Ok(v), Ok(())) => Ok(v),
+        }
+    }
+
+    pub fn read_isdbs_tmcc_tsids() -> io::Result<IsdbsTmccTsids> {
+        let guard = I2c0Guard::attach_and_take()?;
+        let bus = I2c0::open()?;
+        let result = (|| -> io::Result<IsdbsTmccTsids> {
+            let lock_before = bus.read(0x12, 0x5e, 1)?[0];
+            if lock_before & 0x20 == 0 {
+                return Err(io::Error::new(io::ErrorKind::WouldBlock, "ISDB-S is not locked"));
+            }
+            let requested_bytes = bus.read(0x12, 0x2f, 2)?;
+            let requested = u16::from_be_bytes([requested_bytes[0], requested_bytes[1]]);
+            let mut bytes = [0u8; 17];
+            for (index, byte) in bytes.iter_mut().enumerate() {
+                bus.write(0x12, 0x65, &[23 + index as u8])?;
+                *byte = bus.read(0x12, 0x66, 1)?[0];
+            }
+            let mut tsids = [0u16; 8];
+            for (index, tsid) in tsids.iter_mut().enumerate() {
+                let start = index * 2;
+                let window = u32::from_be_bytes([
+                    0,
+                    bytes[start],
+                    bytes[start + 1],
+                    bytes[start + 2],
+                ]);
+                *tsid = ((window >> 3) & 0xffff) as u16;
+            }
+            let lock_after = bus.read(0x12, 0x5e, 1)?[0];
+            Ok(IsdbsTmccTsids { lock_before, lock_after, requested, tsids })
         })();
         let release = guard.release();
         match (result, release) {
@@ -989,7 +1033,7 @@ mod arm_linux {
 
 #[cfg(all(target_os = "linux", target_arch = "arm"))]
 pub use arm_linux::{
-    make_isdbs_ts_output_exclusive, quiesce_ts_output, read_isdbs_status, read_output_regs,
+    make_isdbs_ts_output_exclusive, quiesce_ts_output, read_isdbs_status, read_isdbs_tmcc_tsids, read_output_regs,
     select_tlv_output_exclusive, set_tsout_framing, set_tsout_interface, snapshot_watchlist,
     standby_isdbt, tune, probe_hiz, probe_doset,
     with_isdbs_serial_route,
@@ -1083,6 +1127,14 @@ pub fn read_isdbs_status() -> std::io::Result<IsdbsStatus> {
     Err(std::io::Error::new(
         std::io::ErrorKind::Unsupported,
         "ISDB-S status read is available only in the ARM device build",
+    ))
+}
+
+#[cfg(not(all(target_os = "linux", target_arch = "arm")))]
+pub fn read_isdbs_tmcc_tsids() -> std::io::Result<IsdbsTmccTsids> {
+    Err(std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        "ISDB-S TMCC read is available only in the ARM device build",
     ))
 }
 
