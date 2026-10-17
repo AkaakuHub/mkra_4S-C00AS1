@@ -841,7 +841,7 @@ impl XcDrv {
     /// `me_packet`. ISDB-S is transmitted as RS(204,188), so a demodulator that
     /// emits the 204-byte codeword would never sync against the 188 setting.
     pub fn configure_physical_tsi_packet(&self, port: u32, me_packet: u32) -> io::Result<()> {
-        self.configure_physical_tsi(port, me_packet, false)
+        self.configure_physical_tsi(port, me_packet, false, false)
     }
 
     /// Gate 5E2-SYNC: the product request with `m_use_sync_bit` selectable.
@@ -850,8 +850,10 @@ impl XcDrv {
         port: u32,
         me_packet: u32,
         use_sync: bool,
+        parallel: bool,
     ) -> io::Result<()> {
         let mut req = product_physical_tsi_request(port, me_packet, use_sync);
+        req[2] = u32::from(parallel);
         log_raw_words("physical TSI config request", &req);
         unsafe { self.call(TSI_CONFIG, &mut req)? };
         Ok(())

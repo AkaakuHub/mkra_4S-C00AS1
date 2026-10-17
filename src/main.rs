@@ -78,7 +78,7 @@ USAGE:
   mkra fem-dev --path <1..6> (--dev <hex> | --disconnect) [--dry-run]
   mkra cpld --reg <0..4> [--set <hex> --expect <hex>]
   mkra tsrec --out <path> [--seconds <n>] [--tsi-port <n>]
-  mkra demux --out <path> [--seconds <n>] [--tsi-port <n>] [--tsi-logical-port <0|1>] [--tsi-explicit-route] [--tsi-packet <188|192|204|130>] [--tsi-use-sync]
+  mkra demux --out <path> [--seconds <n>] [--tsi-port <n>] [--tsi-logical-port <0|1>] [--tsi-explicit-route] [--tsi-packet <188|192|204|130>] [--tsi-use-sync] [--tsi-parallel]
              [--pid <0..8191>|--pat-section] [--dry-run]
   mkra remux4k --out <path> [--seconds <n>] [--tsid <hex>] [--dry-run]
   mkra tune4k  --sid <101|102|141|151|161|171|181|211|221|231> [--oid <n>] [--dry-run]
@@ -279,6 +279,7 @@ DEMUX OPTIONS:
   --seconds <n>         capture duration (default 3)
   --tsi-port <n>        physical XCode6 TSI port (default 1 for demux/BS;
                         pass 0 explicitly for GR; BS system=2 maps to TSI1)
+  --tsi-parallel        configure the physical TSI for parallel input
   --pid <0..8191>       diagnostic single-PID output; default is PID=-1 full TS
   --no-filter           Gate 5A: create/run DEMUX and SYSTEM/TS ring without
                         adding a PID filter; mutually exclusive with --pid
@@ -898,6 +899,7 @@ struct Options {
     tsi_packet: u32,
     /// `m_use_sync_bit`, word 4 of the physical TSI request. Gate 5E2-SYNC.
     tsi_use_sync: bool,
+    tsi_parallel: bool,
     channel: Option<u8>,
     if_hz: u32,
 }
@@ -908,6 +910,7 @@ impl Options {
             label: None,
             tsi_packet: xcdrv::ME_PACKET_188,
             tsi_use_sync: false,
+            tsi_parallel: false,
             command: args[0].clone(),
             port: 40772,
             bind: "0.0.0.0".into(),
@@ -1081,6 +1084,7 @@ impl Options {
                 "--pid" => o.pids.push(parse_num(&value()?, a)? as u32),
                 "--label" => o.label = Some(value()?),
                 "--tsi-use-sync" => o.tsi_use_sync = true,
+                "--tsi-parallel" => o.tsi_parallel = true,
                 "--tsi-packet" => {
                     o.tsi_packet = match value()?.as_str() {
                         "188" => xcdrv::ME_PACKET_188,
@@ -2753,12 +2757,8 @@ fn cmd_demux(opts: &Options) -> i32 {
         println!("  ioctl 0x28         AV_SYNC create: [7,0,0,16,OUT_AVSYNC,0]");
         println!("  ioctl 0x000c002a   set AV_SYNC pipeline: [AVSYNC,PIPELINE]");
         println!(
-            "  ioctl 0x50         physical TSI: [{},{},0,1,{},0,1,0,1,0]",
-            opts.tsi_port, opts.tsi_packet, u32::from(opts.tsi_use_sync)
-        );
-        println!(
-            "RESULT gate=5E2-SYNC step=tsi_config ok=1 request=[{},{},0,1,{},0,1,0,1,0]",
-            opts.tsi_port, opts.tsi_packet, u32::from(opts.tsi_use_sync)
+            "  ioctl 0x50         physical TSI: [{},{},{},1,{},0,1,0,1,0]",
+            opts.tsi_port, opts.tsi_packet, u32::from(opts.tsi_parallel), u32::from(opts.tsi_use_sync)
         );
         println!("  ioctl 0x0259002a   AV_SYNC live mode: [AVSYNC,1,1,0,0,0,0,0]");
         println!("  ioctl 0x28         DEMUX create: [0x0c,0,32,0,OUT_DEVICE,0]");
@@ -2891,7 +2891,7 @@ fn cmd_demux(opts: &Options) -> i32 {
         av_sync = drv.create_av_sync().map_err(|e| format!("create AV_SYNC: {e}"))?;
         drv.set_pipeline(av_sync, pipeline)
             .map_err(|e| format!("set AV_SYNC pipeline: {e}"))?;
-        drv.configure_physical_tsi(opts.tsi_port, opts.tsi_packet, opts.tsi_use_sync)
+        drv.configure_physical_tsi(opts.tsi_port, opts.tsi_packet, opts.tsi_use_sync, opts.tsi_parallel)
             .map_err(|e| format!("configure product MPEG-TS TSI{}: {e}", opts.tsi_port))?;
         log_tsi("after physical config")?;
         if opts.demux_observe_tsi_route {
