@@ -122,6 +122,10 @@ const fn product_tsi_request(device: u32) -> [u32; 4] {
     [device, 0, 0, 0]
 }
 
+const fn explicit_tsi_request(device: u32, port: u32) -> [u32; 4] {
+    [device, 0, 0x8000_0000, port]
+}
+
 /// TSI attachment used by `ts_input_t::detect_stream` for a TS_RECODER.
 /// Its fifth `xc_mini_device_config_tsi` argument is the literal `-1`, so the
 /// wrapper does not set bit 31 and the ARC device consumes its direct logical
@@ -878,6 +882,13 @@ impl XcDrv {
     pub fn config_tsi_product_route(&self, device: u32) -> io::Result<()> {
         let mut req = product_tsi_request(device);
         log_raw_words("DEMUX direct-route request", &req);
+        unsafe { self.call(SDEV_CONFIG_TSI, &mut req)? };
+        Ok(())
+    }
+
+    pub fn config_tsi_explicit_route(&self, device: u32, port: u32) -> io::Result<()> {
+        let mut req = explicit_tsi_request(device, port);
+        log_raw_words("DEMUX explicit-route request", &req);
         unsafe { self.call(SDEV_CONFIG_TSI, &mut req)? };
         Ok(())
     }
