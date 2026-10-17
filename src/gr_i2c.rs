@@ -605,6 +605,78 @@ mod arm_linux {
         }
     }
 
+    pub fn with_isdbs_full_route<F>(capture: F) -> io::Result<()>
+    where
+        F: FnOnce() -> io::Result<()>,
+    {
+        let guard = I2c0Guard::attach_and_take()?;
+        let bus = I2c0::open()?;
+        let result = (|| -> io::Result<()> {
+            let lock = bus.read(0x12, 0x5e, 1)?[0];
+            if lock & 0x20 == 0 {
+                return Err(io::Error::other(format!("ISDB-S is not locked: {lock:02x}")));
+            }
+            let changes = [
+                (0x16, 0x0a, 0xff, 0x80),
+                (0x16, 0x0b, 0xff, 0xe0),
+                (0x16, 0x05, 0x00, 0x0c),
+                (0x16, 0x07, 0x00, 0x60),
+                (0x16, 0xcf, 0xff, 0x95),
+                (0x12, 0x73, 0x00, 0x80),
+                (0x17, 0x73, 0x03, 0x24),
+                (0x17, 0x75, 0x01, 0x00),
+                (0x17, 0x7b, 0x67, 0x64),
+                (0x17, 0x7d, 0x81, 0x01),
+                (0x10, 0x13, 0x00, 0x04),
+                (0x10, 0x16, 0x00, 0x21),
+                (0x10, 0xcc, 0xc0, 0x80),
+            ];
+            for &(addr, reg, before, _) in &changes {
+                let actual = bus.read(addr, reg, 1)?[0];
+                if actual != before {
+                    return Err(io::Error::other(format!(
+                        "refuse: {addr:02x}:{reg:02x} is {actual:02x}, expected {before:02x}"
+                    )));
+                }
+            }
+            let mut changed = 0;
+            let applied = (|| -> io::Result<()> {
+                for &(addr, reg, _, value) in &changes {
+                    bus.write(addr, reg, &[value])?;
+                    changed += 1;
+                }
+                eprintln!("isdbs full route active; capturing with all 13 register writes applied");
+                capture()
+            })();
+            let mut restore_error = None;
+            for &(addr, reg, before, _) in changes[..changed].iter().rev() {
+                if let Err(error) = bus.write(addr, reg, &[before]) {
+                    restore_error.get_or_insert(error);
+                }
+            }
+            let restored = (|| -> io::Result<()> {
+                for &(addr, reg, before, _) in &changes {
+                    if bus.read(addr, reg, 1)?[0] != before {
+                        return Err(io::Error::other(format!("restore mismatch at {addr:02x}:{reg:02x}")));
+                    }
+                }
+                Ok(())
+            })();
+            if let Some(error) = restore_error {
+                return Err(error);
+            }
+            restored?;
+            eprintln!("isdbs full route restored and verified");
+            applied
+        })();
+        let release = guard.release();
+        match (result, release) {
+            (Err(error), _) => Err(error),
+            (Ok(_), Err(error)) => Err(error),
+            (Ok(()), Ok(())) => Ok(()),
+        }
+    }
+
     /// Install one of the two documented output-framing states on bank 7.
     ///
     /// Gate 5C1 measured that switching the unit from ISDB-S3 to ISDB-S leaves
@@ -912,7 +984,19 @@ pub use arm_linux::{
     make_isdbs_ts_output_exclusive, quiesce_ts_output, read_isdbs_status, read_output_regs,
     select_tlv_output_exclusive, set_tsout_framing, set_tsout_interface, snapshot_watchlist,
     standby_isdbt, tune, probe_hiz, probe_doset,
+    with_isdbs_full_route,
 };
+
+#[cfg(not(all(target_os = "linux", target_arch = "arm")))]
+pub fn with_isdbs_full_route<F>(_capture: F) -> std::io::Result<()>
+where
+    F: FnOnce() -> std::io::Result<()>,
+{
+    Err(std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        "SC1501A full-route probe is available only in the ARM device build",
+    ))
+}
 
 #[cfg(not(all(target_os = "linux", target_arch = "arm")))]
 pub fn probe_doset(_route_a: bool, _doset_t_enabled: bool) -> std::io::Result<DosetProbeResult> {

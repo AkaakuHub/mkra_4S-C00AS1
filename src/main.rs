@@ -91,6 +91,7 @@ USAGE:
   mkra dmd-doset-probe
   mkra dmd-doset-route-probe
   mkra dmd-doset-t-route-probe
+  mkra dmd-full-route-probe --out <path> --seconds <1..8> --tsi-port 0 --no-filter
   mkra dmd-tsa-probe
   mkra dmd-tsout-base | dmd-tsout-tlv
   mkra dmd-iface-serial | dmd-iface-isdbs | dmd-quiesce
@@ -376,6 +377,7 @@ fn main() {
         "dmd-doset-probe" => cmd_dmd_doset_probe(false, false),
         "dmd-doset-route-probe" => cmd_dmd_doset_probe(true, false),
         "dmd-doset-t-route-probe" => cmd_dmd_doset_probe(true, true),
+        "dmd-full-route-probe" => cmd_dmd_full_route_probe(&opts),
         "dmd-tsa-probe" => cmd_dmd_hiz_probe(true),
         "dmd-tsout-base" => cmd_dmd_tsout(gr_i2c::TsoutTarget::Base),
         "dmd-tsout-tlv" => cmd_dmd_tsout(gr_i2c::TsoutTarget::TlvSpi1Bit),
@@ -525,6 +527,26 @@ fn cmd_dmd_doset_probe(route_a: bool, doset_t_enabled: bool) -> i32 {
         }
         Err(e) => {
             eprintln!("mkra: DOSET1_S probe failed: {e}");
+            1
+        }
+    }
+}
+
+fn cmd_dmd_full_route_probe(opts: &Options) -> i32 {
+    if opts.out.is_none() || opts.tsi_port != 0 || !opts.demux_no_filter || !(1..=8).contains(&opts.seconds) {
+        eprintln!("mkra: full-route probe requires --out, --tsi-port 0, --no-filter and --seconds 1..8");
+        return 2;
+    }
+    match gr_i2c::with_isdbs_full_route(|| {
+        if cmd_demux(opts) == 0 {
+            Ok(())
+        } else {
+            Err(io::Error::other("DEMUX capture failed"))
+        }
+    }) {
+        Ok(()) => 0,
+        Err(error) => {
+            eprintln!("mkra: full-route probe failed: {error}");
             1
         }
     }
