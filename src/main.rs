@@ -91,7 +91,7 @@ USAGE:
   mkra dmd-doset-probe
   mkra dmd-doset-route-probe
   mkra dmd-doset-t-route-probe
-  mkra dmd-serial-route-probe --out <path> --seconds <1..8> --tsi-port 0 --no-filter
+  mkra dmd-serial-route-probe --out <path> --seconds <1..8> --tsi-port 0 [--tsi-logical-port <0|1>]
   mkra dmd-tsa-probe
   mkra dmd-tsout-base | dmd-tsout-tlv
   mkra dmd-iface-serial | dmd-iface-isdbs | dmd-quiesce
@@ -534,8 +534,14 @@ fn cmd_dmd_doset_probe(route_a: bool, doset_t_enabled: bool) -> i32 {
 }
 
 fn cmd_dmd_serial_route_probe(opts: &Options) -> i32 {
-    if opts.out.is_none() || opts.tsi_port != 0 || !opts.demux_no_filter || !(1..=8).contains(&opts.seconds) {
-        eprintln!("mkra: serial-route probe requires --out, --tsi-port 0, --no-filter and --seconds 1..8");
+    if opts.out.is_none()
+        || opts.tsi_port != 0
+        || opts.demux_no_filter
+        || !opts.pids.is_empty()
+        || opts.demux_pat_section
+        || !(1..=8).contains(&opts.seconds)
+    {
+        eprintln!("mkra: serial-route probe requires --out, --tsi-port 0, full TS filter and --seconds 1..8");
         return 2;
     }
     match gr_i2c::with_isdbs_serial_route(|| {
