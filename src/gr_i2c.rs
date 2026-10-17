@@ -459,6 +459,7 @@ mod arm_linux {
                 bus.write(0x16, 0x0b, &[0xe0])?;
                 let active1 = bus.read(0x16, 0x0a, 1)?[0];
                 let active2 = bus.read(0x16, 0x0b, 1)?[0];
+                drv.configure_product_mpeg_ts_tsi(1)?;
                 std::thread::sleep(Duration::from_secs(1));
                 Ok(((active1, active2), drv.tsi_status(1)?))
             })();
