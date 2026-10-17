@@ -48,7 +48,10 @@ pub fn print() -> io::Result<()> {
     let drv = XcDrv::open_path(DEV_PATH)?;
     let ipc_cmd = drv.mmr_read32(0x17104)?;
     let ipc_ack = drv.mmr_read32(0x1710c)?;
+    let p4_cmd = drv.mmr_read32(0x170d4)?;
+    let p4_ack = drv.mmr_read32(0x170dc)?;
     println!("  ipc_command_bits={ipc_cmd:#010x} ipc_ack_bits={ipc_ack:#010x}");
+    println!("  p4_ipc_command_bits={p4_cmd:#010x} p4_ipc_ack_bits={p4_ack:#010x}");
     Ok(())
 }
 
