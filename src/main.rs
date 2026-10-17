@@ -2838,6 +2838,7 @@ fn cmd_tsi_edge_status_probe() -> i32 {
             ));
         }
         let drv = XcDrv::open_path(xcdrv::DEV_PATH).map_err(|e| e.to_string())?;
+        fw_state::ensure_p4_idle(&drv).map_err(|e| format!("refuse TSI edge probe: {e}"))?;
         let before = drv.mmr_read32(0x6008).map_err(|e| e.to_string())?;
         if before != 0x0300_0300 {
             return Err(format!("refuse: TSI edge MMR is 0x{before:08x}, expected 0x03000300"));
@@ -3041,6 +3042,10 @@ fn cmd_demux_core(opts: &Options) -> i32 {
             return 1;
         }
     };
+    if let Err(e) = fw_state::ensure_p4_idle(&drv) {
+        eprintln!("mkra: refuse DEMUX probe: {e}");
+        return 1;
+    }
 
     let (mut pipeline, mut av_sync, mut device, mut buffer, mut connection, mut reader) =
         (0u32, 0u32, 0u32, 0u32, 0u32, 0u32);

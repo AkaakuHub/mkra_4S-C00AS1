@@ -3,6 +3,26 @@ use std::io;
 use crate::graph::{ksym, Kmem};
 use crate::xcdrv::{XcDrv, DEV_PATH};
 
+pub fn ensure_p4_idle(drv: &XcDrv) -> io::Result<()> {
+    let mut kmem = Kmem::open()?;
+    let ctx = kmem.u32(ksym("gps_XCode")?)?;
+    if ctx < 0x8000_0000 || kmem.u32(ctx + 0x463b0)? != 100 {
+        return Err(io::Error::other("unexpected XCode6 request queue layout"));
+    }
+    let free_head = ctx + 0x48014;
+    if kmem.u32(ctx + 0x48020)? != free_head {
+        return Err(io::Error::other("unexpected XCode6 request queue head"));
+    }
+    if kmem.u32(free_head)? == free_head {
+        return Err(io::Error::other("XCode6 request queue has no free slots"));
+    }
+    let pending = drv.mmr_read32(0x170d4)?;
+    if pending != 0 {
+        return Err(io::Error::other(format!("P4 command notification is pending: 0x{pending:08x}")));
+    }
+    Ok(())
+}
+
 pub fn print() -> io::Result<()> {
     let mut kmem = Kmem::open()?;
     let ctx = kmem.u32(ksym("gps_XCode")?)?;
