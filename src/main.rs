@@ -94,6 +94,7 @@ USAGE:
   mkra dmd-doset-route-probe
   mkra dmd-doset-t-route-probe
   mkra dmd-serial-route-probe --out <path> --seconds <1..8> --tsi-port 0 [--tsi-logical-port <0|1>]
+  mkra dmd-tsset2-probe --out <path> --seconds <1..8> --tsi-port 0 [--tsi-logical-port <0|1>]
   mkra dmd-tsa-probe
   mkra dmd-tsout-base | dmd-tsout-tlv
   mkra dmd-iface-serial | dmd-iface-isdbs | dmd-quiesce
@@ -382,7 +383,8 @@ fn main() {
         "dmd-doset-probe" => cmd_dmd_doset_probe(false, false),
         "dmd-doset-route-probe" => cmd_dmd_doset_probe(true, false),
         "dmd-doset-t-route-probe" => cmd_dmd_doset_probe(true, true),
-        "dmd-serial-route-probe" => cmd_dmd_serial_route_probe(&opts),
+        "dmd-serial-route-probe" => cmd_dmd_output_probe(&opts, false),
+        "dmd-tsset2-probe" => cmd_dmd_output_probe(&opts, true),
         "dmd-tsa-probe" => cmd_dmd_hiz_probe(true),
         "dmd-tsout-base" => cmd_dmd_tsout(gr_i2c::TsoutTarget::Base),
         "dmd-tsout-tlv" => cmd_dmd_tsout(gr_i2c::TsoutTarget::TlvSpi1Bit),
@@ -556,7 +558,7 @@ fn cmd_dmd_doset_probe(route_a: bool, doset_t_enabled: bool) -> i32 {
     }
 }
 
-fn cmd_dmd_serial_route_probe(opts: &Options) -> i32 {
+fn cmd_dmd_output_probe(opts: &Options, tsset2_only: bool) -> i32 {
     if opts.out.is_none()
         || opts.tsi_port != 0
         || opts.demux_no_filter
@@ -564,19 +566,25 @@ fn cmd_dmd_serial_route_probe(opts: &Options) -> i32 {
         || opts.demux_pat_section
         || !(1..=8).contains(&opts.seconds)
     {
-        eprintln!("mkra: serial-route probe requires --out, --tsi-port 0, full TS filter and --seconds 1..8");
+        eprintln!("mkra: output probe requires --out, --tsi-port 0, full TS filter and --seconds 1..8");
         return 2;
     }
-    match gr_i2c::with_isdbs_serial_route(|| {
+    let capture = || {
         if cmd_demux(opts) == 0 {
             Ok(())
         } else {
             Err(io::Error::other("DEMUX capture failed"))
         }
-    }) {
+    };
+    let result = if tsset2_only {
+        gr_i2c::with_isdbs_tsset2(capture)
+    } else {
+        gr_i2c::with_isdbs_serial_route(capture)
+    };
+    match result {
         Ok(()) => 0,
         Err(error) => {
-            eprintln!("mkra: serial-route probe failed: {error}");
+            eprintln!("mkra: output probe failed: {error}");
             1
         }
     }
