@@ -63,6 +63,7 @@ pub fn print_queue() -> io::Result<()> {
         return Err(io::Error::other("short XCode6 diagnostic queue read"));
     }
     println!("XCode6 diagnostic slots (read-only):");
+    println!("index allocated state command subcommand processor device_handle");
     for index in 0..100 {
         let base = index * 0x3c;
         let word = |offset: usize| {
