@@ -144,10 +144,7 @@ pub struct Decoder<C: Card> {
     system: [u8; 32],
     iv: [u8; 8],
     tsid: u16,
-    wanted_service: Option<u16>,
     full_multiplex: bool,
-    wanted_pmt: Option<u16>,
-    wanted_ecms: BTreeSet<u16>,
     sections: BTreeMap<u16, Sections>,
     pmts: BTreeSet<u16>,
     seen_pmts: BTreeSet<u16>,
@@ -171,10 +168,7 @@ impl<C: Card> Decoder<C> {
             system,
             iv,
             tsid,
-            wanted_service: None,
             full_multiplex: false,
-            wanted_pmt: None,
-            wanted_ecms: BTreeSet::new(),
             sections: BTreeMap::from([(0, Sections::default())]),
             pmts: BTreeSet::new(),
             seen_pmts: BTreeSet::new(),
@@ -191,10 +185,6 @@ impl<C: Card> Decoder<C> {
             updates: 0,
             encrypted_passthrough: BTreeMap::new(),
         }
-    }
-    pub fn select_service(mut self, service: u16) -> Self {
-        self.wanted_service = Some(service);
-        self
     }
     pub fn full_multiplex(mut self) -> Self {
         self.full_multiplex = true;
@@ -216,18 +206,11 @@ impl<C: Card> Decoder<C> {
                 return Err(bad("multi-section PAT unsupported"));
             }
             let mut pmts = BTreeSet::new();
-            self.wanted_pmt = None;
             for r in s[8..s.len() - 4].chunks_exact(4) {
                 if r[..2] != [0, 0] {
                     let pmt = (((r[2] & 31) as u16) << 8) | r[3] as u16;
                     pmts.insert(pmt);
-                    if self.wanted_service == Some(u16::from_be_bytes([r[0], r[1]])) {
-                        self.wanted_pmt = Some(pmt);
-                    }
                 }
-            }
-            if self.wanted_service.is_some() && self.wanted_pmt.is_none() {
-                return Err(bad("requested service is absent from received PAT"));
             }
             if pmts.is_empty() || pmts.len() > 64 {
                 return Err(bad("PAT program bounds"));
@@ -244,13 +227,6 @@ impl<C: Card> Decoder<C> {
             if s.len() < 16 {
                 return Err(bad("PMT too short"));
             }
-            if self.wanted_pmt == Some(pid)
-                && self.wanted_service != Some(u16::from_be_bytes([s[3], s[4]]))
-            {
-                return Err(bad(
-                    "requested PAT service differs from received PMT service",
-                ));
-            }
             if s[5] & 1 == 0 {
                 return Ok(());
             }
@@ -263,7 +239,6 @@ impl<C: Card> Decoder<C> {
                 return Err(bad("PMT program descriptors truncated"));
             }
             let program_ca = ca(&s[12..12 + len])?;
-            let mut ecms = BTreeSet::new();
             let mut n = 12 + len;
             while n < end {
                 if n + 5 > end {
@@ -283,12 +258,8 @@ impl<C: Card> Decoder<C> {
                     }
                     self.routes.insert(es, ecm);
                     self.sections.entry(ecm).or_default();
-                    ecms.insert(ecm);
                 }
                 n += 5 + size;
-            }
-            if self.wanted_pmt == Some(pid) {
-                self.wanted_ecms = ecms;
             }
             self.seen_pmts.insert(pid);
         } else if self.routes.values().any(|&p| p == pid) && [0x82, 0x83].contains(&s[0]) {
@@ -348,9 +319,7 @@ impl<C: Card> Decoder<C> {
             // ciphertext and flags; strict diagnostics reject ambiguity.
             let ecm = match self.ecm_for_pid(pid) {
                 Some(ecm) => ecm,
-                None if (self.wanted_service.is_some() || self.full_multiplex)
-                    && !self.routes.contains_key(&pid) =>
-                {
+                None if self.full_multiplex && !self.routes.contains_key(&pid) => {
                     // An unfiltered multiplex may include ancillary PIDs whose
                     // PMT is off-air. Preserve ciphertext AND its scrambling
                     // flag rather than guessing a key or ending the main service.
@@ -363,10 +332,7 @@ impl<C: Card> Decoder<C> {
             };
             let key = match self.keys.get(&ecm) {
                 Some(key) => key,
-                None if self.wanted_service.is_some()
-                    || self.full_multiplex
-                    || self.rejected.contains_key(&ecm) =>
-                {
+                None if self.full_multiplex || self.rejected.contains_key(&ecm) => {
                     *self.encrypted_passthrough.entry(pid).or_default() += 1;
                     out.extend_from_slice(&p);
                     self.packets += 1;
@@ -427,13 +393,7 @@ impl<C: Card> Decoder<C> {
                         }
                         ready || full
                     } else {
-                        self.wanted_pmt.map_or(self.pmts == self.seen_pmts, |pid| {
-                            self.seen_pmts.contains(&pid)
-                        }) && if self.wanted_service.is_some() {
-                            self.wanted_ecms.iter().all(|pid| {
-                                self.keys.contains_key(pid) || self.rejected.contains_key(pid)
-                            })
-                        } else {
+                        self.pmts == self.seen_pmts && {
                             (self.routes.is_empty()
                                 || !self.keys.is_empty()
                                 || !self.rejected.is_empty())
@@ -590,22 +550,25 @@ mod tests {
         );
     }
     #[test]
-    fn requested_service_starts_without_a_missing_unrelated_pmt() {
+    fn multiplex_starts_at_buffer_limit_with_a_missing_pmt() {
         let mut ts = tables();
         let pat = section(vec![
             0, 0xb0, 0, 0x40, 0x10, 0xc1, 0, 0, 0, 151, 0xe1, 0, 3, 0xe7, 0xe2, 0,
         ]);
         ts[0] = packet(0, 0, &pat);
-        let mut d = Decoder::new(Fake { calls: 0 }, [0; 32], [0; 8], 0x4010).select_service(151);
+        let mut d = Decoder::new(Fake { calls: 0 }, [0; 32], [0; 8], 0x4010).full_multiplex();
         let mut out = Vec::new();
         for p in &ts {
             d.push(p, &mut out).unwrap();
         }
-        assert_eq!(out.len(), 3 * 188);
+        assert!(out.is_empty());
+        let mut null = [0xff; 188];
+        null[..4].copy_from_slice(&[0x47, 0x1f, 0xff, 0x10]);
+        for _ in 3..STARTUP_PACKETS {
+            d.push(&null, &mut out).unwrap();
+        }
+        assert_eq!(out.len(), STARTUP_PACKETS * 188);
         assert_eq!(d.card.calls, 1);
-        let mut wrong =
-            Decoder::new(Fake { calls: 0 }, [0; 32], [0; 8], 0x4010).select_service(152);
-        assert!(wrong.push(&ts[0], &mut Vec::new()).is_err());
         let mut unknown = [0u8; 188];
         unknown[..4].copy_from_slice(&[0x47, 2, 0x10, 0x90]);
         out.clear();
