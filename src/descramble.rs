@@ -95,8 +95,18 @@ impl Sections {
     }
 }
 fn payload(p: &[u8]) -> io::Result<Option<usize>> {
-    if p.len() != 188 || p[0] != 0x47 || p[1] & 0x80 != 0 || p[3] & 0x30 == 0 {
-        return Err(bad("TS sync/TEI/header invalid"));
+    if p.len() != 188 {
+        return Err(bad("TS packet length invalid"));
+    }
+    if p[0] != 0x47 {
+        return Err(bad(&format!("TS sync invalid: header={:02X?}", &p[..4])));
+    }
+    let pid = (((p[1] & 31) as u16) << 8) | p[2] as u16;
+    if p[3] & 0x30 == 0 {
+        return Err(bad(&format!(
+            "TS adaptation control invalid: PID={pid:#x} header={:02X?}",
+            &p[..4]
+        )));
     }
     let off = if p[3] & 0x20 != 0 {
         5 + p[4] as usize
@@ -104,7 +114,10 @@ fn payload(p: &[u8]) -> io::Result<Option<usize>> {
         4
     };
     if off > 188 {
-        return Err(bad("TS adaptation bounds"));
+        return Err(bad(&format!(
+            "TS adaptation bounds: PID={pid:#x} header={:02X?}",
+            &p[..4]
+        )));
     }
     Ok(if p[3] & 0x10 != 0 && off < 188 {
         Some(off)
@@ -156,6 +169,7 @@ pub struct Decoder<C: Card> {
     pat: bool,
     started: bool,
     scrambled_pids: BTreeSet<u16>,
+    transport_errors: u64,
     pub packets: u64,
     pub decrypted: u64,
     pub updates: u64,
@@ -180,6 +194,7 @@ impl<C: Card> Decoder<C> {
             pat: false,
             started: false,
             scrambled_pids: BTreeSet::new(),
+            transport_errors: 0,
             packets: 0,
             decrypted: 0,
             updates: 0,
@@ -359,8 +374,22 @@ impl<C: Card> Decoder<C> {
         let count = self.fragment.len() / 188;
         for i in 0..count {
             let p: [u8; 188] = self.fragment[i * 188..(i + 1) * 188].try_into().unwrap();
-            let offset = payload(&p)?;
             let pid = (((p[1] & 31) as u16) << 8) | p[2] as u16;
+            if p[0] == 0x47 && p[1] & 0x80 != 0 {
+                if let Some(assembler) = self.sections.get_mut(&pid) {
+                    *assembler = Sections::default();
+                }
+                self.transport_errors += 1;
+                if self.transport_errors.is_power_of_two() {
+                    eprintln!(
+                        "mkra: discarded TEI TS packet: count={} PID={pid:#x} header={:02X?}",
+                        self.transport_errors,
+                        &p[..4]
+                    );
+                }
+                continue;
+            }
+            let offset = payload(&p)?;
             if p[3] >> 6 == 0 {
                 if let (Some(offset), Some(assembler)) = (offset, self.sections.get_mut(&pid)) {
                     let ss = assembler.push(&p, offset)?;
