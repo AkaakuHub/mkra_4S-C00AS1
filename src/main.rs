@@ -1630,6 +1630,18 @@ fn cmd_serve(opts: &Options) -> i32 {
         }
     }
 
+    let channel_file = opts.isdbs_channels.clone().zip(isdbs_loaded).zip(isdbs_base)
+        .map(|((path, loaded), base)| channel_sync::ChannelFile { path, loaded, base });
+    if channel_file.is_some() || (opts.bs2k && cfg!(feature = "software-cas")) {
+        if let Err(error) = channel_sync::start(
+            channel_file, Arc::clone(&broker), cleanup_failed,
+        ) {
+            eprintln!("mkra: cannot start receiver configuration synchronization: {error}");
+            return 1;
+        }
+    }
+
+
     let addr = format!("{}:{}", opts.bind, opts.port);
     let listener = match TcpListener::bind(&addr) {
         Ok(l) => l,
@@ -1645,16 +1657,6 @@ fn cmd_serve(opts: &Options) -> i32 {
         state.table.channels.len()
     );
 
-    let channel_file = opts.isdbs_channels.clone().zip(isdbs_loaded).zip(isdbs_base)
-        .map(|((path, loaded), base)| channel_sync::ChannelFile { path, loaded, base });
-    if channel_file.is_some() || (opts.bs2k && cfg!(feature = "software-cas")) {
-        if let Err(error) = channel_sync::start(
-            channel_file, Arc::clone(&broker), cleanup_failed,
-        ) {
-            eprintln!("mkra: cannot start receiver configuration synchronization: {error}");
-            return 1;
-        }
-    }
 
     let handler_state = Arc::clone(&state);
     let result = http::serve(

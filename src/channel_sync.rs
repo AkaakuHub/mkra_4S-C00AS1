@@ -56,7 +56,17 @@ pub fn start(
 ) -> io::Result<()> {
     let args: Vec<_> = std::env::args_os().collect();
     #[cfg(feature = "software-cas")]
-    let loaded_keys = std::env::var(KEY_GENERATION_ENV).ok();
+    let loaded_keys = match std::env::var(KEY_GENERATION_ENV).ok() {
+        Some(generation) => Some(generation),
+        None => {
+            let error = Command::new("/proc/self/exe")
+                .arg0(&args[0])
+                .args(&args[1..])
+                .env(KEY_GENERATION_ENV, key_generation()?)
+                .exec();
+            return Err(error);
+        }
+    };
     thread::Builder::new()
         .name("channel-sync".into())
         .spawn(move || {
