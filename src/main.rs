@@ -78,7 +78,7 @@ USAGE:
   mkra fem-dev --path <1..6> (--dev <hex> | --disconnect) [--dry-run]
   mkra cpld --reg <0..4> [--set <hex> --expect <hex>]
   mkra tsrec --out <path> [--seconds <n>] [--tsi-port <n>]
-  mkra demux --out <path> [--seconds <n>] [--tsi-port <n>] [--tsi-logical-port <0|1>] [--tsi-explicit-route] [--tsi-crossbar-source <1>] [--tsi-packet <188|192|204|130>] [--tsi-use-sync] [--tsi-parallel] [--tsi-positive-edge]
+  mkra demux --out <path> [--seconds <n>] [--tsi-port <n>] [--tsi-logical-port <0|1>] [--tsi-explicit-route] [--tsi-crossbar-source <1>] [--tsi-packet <188|192|204|130>] [--tsi-use-sync] [--tsi-parallel] [--tsi-positive-edge] [--tsi-preserve-config]
              [--pid <0..8191>|--pat-section] [--run-after-filter] [--dry-run]
   mkra remux4k --out <path> [--seconds <n>] [--tsid <hex>] [--dry-run]
   mkra tune4k  --sid <101|102|141|151|161|171|181|211|221|231> [--oid <n>] [--dry-run]
@@ -945,6 +945,7 @@ struct Options {
     tsi_use_sync: bool,
     tsi_parallel: bool,
     tsi_positive_edge: bool,
+    tsi_preserve_config: bool,
     channel: Option<u8>,
     if_hz: u32,
 }
@@ -957,6 +958,7 @@ impl Options {
             tsi_use_sync: false,
             tsi_parallel: false,
             tsi_positive_edge: false,
+            tsi_preserve_config: false,
             command: args[0].clone(),
             port: 40772,
             bind: "0.0.0.0".into(),
@@ -1136,6 +1138,7 @@ impl Options {
                 "--tsi-use-sync" => o.tsi_use_sync = true,
                 "--tsi-parallel" => o.tsi_parallel = true,
                 "--tsi-positive-edge" => o.tsi_positive_edge = true,
+                "--tsi-preserve-config" => o.tsi_preserve_config = true,
                 "--tsi-packet" => {
                     o.tsi_packet = match value()?.as_str() {
                         "188" => xcdrv::ME_PACKET_188,
@@ -2935,6 +2938,15 @@ fn cmd_demux_core(opts: &Options) -> i32 {
         eprintln!("mkra: --tsi-positive-edge requires TSI1, 188-byte serial input, direct route and --seconds 1..8");
         return 2;
     }
+    if opts.tsi_preserve_config
+        && (opts.tsi_port != 0 || opts.tsi_packet != xcdrv::ME_PACKET_188
+            || opts.tsi_use_sync || opts.tsi_parallel || opts.tsi_positive_edge
+            || opts.demux_crossbar_source.is_some() || opts.demux_explicit_route
+            || !(1..=8).contains(&opts.seconds))
+    {
+        eprintln!("mkra: --tsi-preserve-config requires TSI0, 188-byte input, direct route and --seconds 1..8");
+        return 2;
+    }
     if opts.demux_logical_port > 1 || (opts.demux_explicit_route && opts.demux_logical_port != 0) {
         eprintln!("mkra: --tsi-logical-port must be 0 or 1 and cannot be combined with --tsi-explicit-route");
         return 2;
@@ -2976,10 +2988,14 @@ fn cmd_demux_core(opts: &Options) -> i32 {
         println!("  ioctl 0x46         pipeline create: [OUT_PIPELINE]");
         println!("  ioctl 0x28         AV_SYNC create: [7,0,0,16,OUT_AVSYNC,0]");
         println!("  ioctl 0x000c002a   set AV_SYNC pipeline: [AVSYNC,PIPELINE]");
-        println!(
-            "  ioctl 0x50         physical TSI: [{},{},{},1,{},0,1,0,{},0]",
-            opts.tsi_port, opts.tsi_packet, u32::from(opts.tsi_parallel), u32::from(opts.tsi_use_sync), u32::from(!opts.tsi_positive_edge)
-        );
+        if opts.tsi_preserve_config {
+            println!("  physical TSI: preserve current configuration after verifying the 2K state");
+        } else {
+            println!(
+                "  ioctl 0x50         physical TSI: [{},{},{},1,{},0,1,0,{},0]",
+                opts.tsi_port, opts.tsi_packet, u32::from(opts.tsi_parallel), u32::from(opts.tsi_use_sync), u32::from(!opts.tsi_positive_edge)
+            );
+        }
         if opts.tsi_positive_edge {
             println!("  guarded TSI1 edge: MMR 0x6008 0x03000300 -> 0x01000300 -> 0x03000300");
         }
@@ -3059,6 +3075,24 @@ fn cmd_demux_core(opts: &Options) -> i32 {
         eprintln!("mkra: refuse DEMUX probe: {e}");
         return 1;
     }
+    if opts.tsi_preserve_config {
+        let state = (|| -> io::Result<()> {
+            let status = gr_i2c::read_isdbs_status()?;
+            if status.lock != 0x67 || status.ts_pin != 1 || status.ts_serial != 0xc0
+                || drv.mmr_read32(0x6000)? != 0x0300_0000
+                || drv.mmr_read32(0x6008)? != 0x0300_0300
+                || drv.mmr_read32(0x600c)? != 0
+                || !drv.tsi_status(0)?.0
+            {
+                return Err(io::Error::other("unexpected 2K demodulator or TSI0 state"));
+            }
+            Ok(())
+        })();
+        if let Err(e) = state {
+            eprintln!("mkra: refuse preserve-config DEMUX probe: {e}");
+            return 1;
+        }
+    }
 
     let (mut pipeline, mut av_sync, mut device, mut buffer, mut connection, mut reader) =
         (0u32, 0u32, 0u32, 0u32, 0u32, 0u32);
@@ -3135,7 +3169,9 @@ fn cmd_demux_core(opts: &Options) -> i32 {
         av_sync = drv.create_av_sync().map_err(|e| format!("create AV_SYNC: {e}"))?;
         drv.set_pipeline(av_sync, pipeline)
             .map_err(|e| format!("set AV_SYNC pipeline: {e}"))?;
-        if opts.tsi_positive_edge {
+        if opts.tsi_preserve_config {
+            eprintln!("demux: preserving physical TSI{} configuration", opts.tsi_port);
+        } else if opts.tsi_positive_edge {
             let before = drv.mmr_read32(0x6008).map_err(|e| e.to_string())?;
             if before != 0x0300_0300 {
                 return Err(format!("refuse: TSI edge MMR is 0x{before:08x}, expected 0x03000300"));
