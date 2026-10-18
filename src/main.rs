@@ -1381,7 +1381,7 @@ fn cmd_serve(opts: &Options) -> i32 {
                 }
                 if unified {
                     let asked=want[key];
-                    let live=unified_tune4k(&drv,asked,&oid,restored || resume_for_factory.load(Ordering::SeqCst))?;
+                    let live=unified_tune4k(&drv,asked,&oid)?;
                     let no_decoder=remux4k::discover(&drv).is_ok_and(|es|es.video_readers==0 || es.audio_readers==0);
                     let cfg=remux4k::TapConfig {stream_id:live.tlv_stream_id, service_id:live.service_id,
                         allow_no_decoder:true, es_level_abort:if no_decoder {101}else{base.es_level_abort}, ..base};
@@ -3607,7 +3607,7 @@ fn tune_and_wait(service_id: u16, oid: &Arc<AtomicU32>) -> io::Result<si::LiveSe
 /// The native presentation cache can retain a previous MH-SDT indefinitely
 /// after BS2K stops HDMI decoding. Confirm native acquired package and live ES,
 /// rather than waiting for the HDMI decoder or assigning the requested ID.
-fn unified_tune4k(drv:&Arc<XcDrv>,asked:u16,oid:&Arc<AtomicU32>,force:bool)->io::Result<si::LiveService> {
+fn unified_tune4k(drv:&Arc<XcDrv>,asked:u16,oid:&Arc<AtomicU32>)->io::Result<si::LiveService> {
     let send=|mode|->io::Result<()> {
         let (tsid,freq,bid)=channels::tuning_record(asked).ok_or_else(||io::Error::other("unknown 4K service"))?;
         tuner::Tuner::open_qid(tuner::ADSB_COMM_QID,tuner::MSGH_LIST)?.change_channel(&tuner::ChangeChannelRequest {
@@ -3615,10 +3615,8 @@ fn unified_tune4k(drv:&Arc<XcDrv>,asked:u16,oid:&Arc<AtomicU32>,force:bool)->io:
         })
     };
     let selection=native_selection::Reader::open()?;
-    if force || selection.selected()?.map(|s|s.live.service_id)!=Some(asked) || remux4k::discover(drv).is_err() {
-        send(tuner::TUNE_CHANNEL_CHANGE)?;
-        std::thread::sleep(Duration::from_millis(1000));
-    }
+    send(tuner::TUNE_CHANNEL_CHANGE)?;
+    std::thread::sleep(Duration::from_millis(1000));
     let begin=Instant::now();let mut resumed=false;let mut last=String::from("native request/acquired package not settled on requested service");
     while begin.elapsed()<Duration::from_secs(11) {
         if let Some(selected)=selection.selected()? {
