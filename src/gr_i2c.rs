@@ -20,6 +20,13 @@ pub struct IsdbsStatus {
     pub ts_serial: u8,
 }
 
+// Native tuner:1caac writes 0x12 to reg15; measured standby readback is 0x02.
+pub const SATELLITE_STANDBY_REGS: [(u8, u8); 9] = [
+    (0x15, 0x02), (0x43, 0x05), (0x45, 0x01),
+    (0x0c, 0x14), (0x0d, 0x00), (0x0e, 0x00),
+    (0x01, 0x00), (0x05, 0x00), (0x04, 0xc0),
+];
+
 /// Result of the one-byte ISDB-S/TLV output-mode exclusion repair.
 pub struct IsdbsTsExclusiveResult {
     pub before: u8,
@@ -405,6 +412,23 @@ mod arm_linux {
     /// state.  The product exposes this as SC1501A page `0x12`, register
     /// `0x5e`, bit 5.  Keep the same attach-only semaphore discipline as the
     /// GR takeover path so this diagnostic cannot race the vendor tuner.
+    pub fn satellite_rf_registers() -> io::Result<[(u8, u8); 9]> {
+        let guard = I2c0Guard::attach_and_take()?;
+        let bus = I2c0::open()?;
+        let result = (|| {
+            let mut registers = super::SATELLITE_STANDBY_REGS;
+            for (reg, value) in &mut registers {
+                *value = bus.read(0x60, *reg, 1)?[0];
+            }
+            Ok(registers)
+        })();
+        let release = guard.release();
+        match (result, release) {
+            (Err(e), _) | (Ok(_), Err(e)) => Err(e),
+            (Ok(registers), Ok(())) => Ok(registers),
+        }
+    }
+
     pub fn read_isdbs_status() -> io::Result<IsdbsStatus> {
         let guard = I2c0Guard::attach_and_take()?;
         let bus = I2c0::open()?;
@@ -951,8 +975,13 @@ pub use arm_linux::{
     make_isdbs_ts_output_exclusive, quiesce_ts_output, read_isdbs_status, read_output_regs,
     select_tlv_output_exclusive, set_tsout_framing, set_tsout_interface, snapshot_watchlist,
     standby_isdbt, tune, experiment_spi_forward, experiment_ts_parallel,
-    read_isdbs_tmcc, select_isdbs_relative_zero,
+    read_isdbs_tmcc, select_isdbs_relative_zero, satellite_rf_registers,
 };
+
+#[cfg(not(all(target_os = "linux", target_arch = "arm")))]
+pub fn satellite_rf_registers() -> std::io::Result<[(u8, u8); 9]> {
+    Err(std::io::Error::other("satellite RF state requires the ARM device build"))
+}
 
 #[cfg(not(all(target_os = "linux", target_arch = "arm")))]
 pub fn select_isdbs_relative_zero(_restore: bool) -> std::io::Result<IsdbsTsExclusiveResult> {

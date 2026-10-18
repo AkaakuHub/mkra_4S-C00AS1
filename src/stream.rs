@@ -351,6 +351,7 @@ pub struct Broker {
     cfg: BrokerConfig,
     factory: SourceFactory,
     state: Mutex<Option<Arc<Session>>>,
+    idle_since: Mutex<Instant>,
 }
 
 impl Broker {
@@ -359,11 +360,28 @@ impl Broker {
             cfg,
             factory,
             state: Mutex::new(None),
+            idle_since: Mutex::new(Instant::now()),
         })
     }
 
     pub fn current(&self) -> Option<Arc<Session>> {
         self.state.lock().unwrap_or_else(|e| e.into_inner()).clone()
+    }
+
+    pub fn run_when_idle(
+        &self,
+        duration: Duration,
+        action: impl FnOnce() -> io::Result<()>,
+    ) -> io::Result<bool> {
+        let state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        if state.is_some()
+            || self.idle_since.lock().unwrap_or_else(|e| e.into_inner()).elapsed() < duration
+        {
+            return Ok(false);
+        }
+        action()?;
+        drop(state);
+        Ok(true)
     }
 
     pub fn subscribe(
@@ -553,6 +571,7 @@ fn pump(
     let mut state = broker.state.lock().unwrap_or_else(|e| e.into_inner());
     if state.as_ref().is_some_and(|s| Arc::ptr_eq(s, &session)) {
         *state = None;
+        *broker.idle_since.lock().unwrap_or_else(|e| e.into_inner()) = Instant::now();
     }
 }
 
