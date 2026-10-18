@@ -571,6 +571,11 @@ impl XcDrv {
 
     unsafe fn call<T>(&self, request: c_int, arg: &mut T) -> io::Result<c_int> {
         sys::ioctl_ptr(self.fd(), request, arg as *mut T as *mut c_void)
+            .inspect_err(|error| {
+                if request != SBUF_GET_READ {
+                    eprintln!("xcdrv: ioctl {request:#010x} failed: {error}");
+                }
+            })
     }
 
     /// Read one XCode6 MMR word through the mapping installed by
