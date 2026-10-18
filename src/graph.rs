@@ -149,9 +149,9 @@ impl Graph {
             let ptr = k.u32(ctx + poff)?;
             let mut rows = Vec::new();
             if ptr >= 0x8000_0000 && count as usize <= cap {
-                let n = cap;
-                let raw = k.read(ptr, n * stride)?;
-                for i in 0..n {
+                // The live-entry count does not bound slots left sparse by removals.
+                let raw = k.read(ptr, cap * stride)?;
+                for i in 0..cap {
                     let base = i * stride;
                     if base + stride > raw.len() {
                         break;
