@@ -402,6 +402,12 @@ pub struct Transponder {
     pub service_ids: Vec<u16>,
 }
 
+#[derive(Debug, Clone)]
+pub struct ScheduleSection {
+    pub received_at_ms: i64,
+    pub data: Vec<u8>,
+}
+
 /// Everything recovered from one pass over a set of `.dat` slabs.
 #[derive(Debug, Clone, Default)]
 pub struct SiDb {
@@ -411,6 +417,7 @@ pub struct SiDb {
     pub services: BTreeMap<u64, SiService>,
     pub programs: BTreeMap<u64, Program>,
     pub present_following: BTreeMap<(u16, u16, u8), Vec<u8>>,
+    pub schedule_sections: BTreeMap<(u16, u16, u8, u8), ScheduleSection>,
     /// Broadcast clock from MH-TOT, Unix seconds UTC.
     pub broadcast_time: Option<i64>,
     /// Remote-control key id per service, from the TLV-NIT 0xCD descriptor.
@@ -466,6 +473,43 @@ fn sampling_rate(code: u8) -> Option<u32> {
 }
 
 impl SiDb {
+    pub fn cache_schedule_section(&mut self, section: &[u8], received_at_ms: i64) {
+        if section.len() < 18 || !(TID_MH_EIT_SCH_FIRST..=TID_MH_EIT_SCH_LAST).contains(&section[0])
+            || section[5] & 1 == 0 || section[6] > section[12] || section[12] > section[7]
+            || section[6] / 8 != section[12] / 8
+        {
+            return;
+        }
+        let mut offset = 14;
+        let end = section.len() - 4;
+        while offset < end {
+            if offset + 12 > end {
+                return;
+            }
+            let length = (usize::from(section[offset + 10] & 15) << 8)
+                | usize::from(section[offset + 11]);
+            offset += 12 + length;
+            if offset > end {
+                return;
+            }
+        }
+        let (nid, sid, tid, number) = (u16b(section, 10), u16b(section, 3), section[0], section[6]);
+        let key = (nid, sid, tid, number);
+        if let Some(previous) = self.schedule_sections.get_mut(&key) {
+            if previous.data == section {
+                previous.received_at_ms = received_at_ms;
+                return;
+            }
+        }
+        for number in (u16::from(section[7]) + 1)..=255 {
+            self.schedule_sections.remove(&(nid, sid, tid, number as u8));
+        }
+        for number in (u16::from(section[12]) + 1)..=u16::from(section[6] | 7) {
+            self.schedule_sections.remove(&(nid, sid, tid, number as u8));
+        }
+        self.schedule_sections.insert(key, ScheduleSection { received_at_ms, data: section.to_vec() });
+    }
+
     pub fn new() -> Self {
         Self::default()
     }
