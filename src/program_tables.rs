@@ -171,6 +171,10 @@ impl ProgramTables {
             for packet in output[start..].chunks_exact_mut(188) {
                 let pid = (u16::from(packet[1] & 31) << 8) | u16::from(packet[2]);
                 if pid == PMT_PID as u16 {
+                    let version = ((packet[10] >> 1).wrapping_add(self.version)) & 31;
+                    self.pmt[5] = 0xc1 | (version << 1);
+                    self.pmt.truncate(self.pmt.len() - 4);
+                    self.pmt.extend_from_slice(&crc32_mpeg(&self.pmt).to_be_bytes());
                     packet[1] = 0x40 | ((PMT_PID >> 8) as u8 & 31);
                     packet[3] = 0x10 | (packet[3] & 15);
                     packet[4] = 0;
