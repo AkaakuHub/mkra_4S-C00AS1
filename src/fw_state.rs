@@ -103,11 +103,11 @@ pub fn print_queue() -> io::Result<()> {
 
 pub fn print_p4_queue() -> io::Result<()> {
     let mut kmem = Kmem::open()?;
-    let ctx = kmem.u32(ksym("gps_XCode")?)?;
-    if ctx < 0x8000_0000 || kmem.u32(ctx + 0x463b0)? != 100 {
-        return Err(io::Error::other("unexpected XCode6 queue layout"));
+    let sg_av = kmem.u32(ksym("gncp_sg_av")?)?;
+    if sg_av < 0x8000_0000 {
+        return Err(io::Error::other("unexpected XCode6 shared-memory address"));
     }
-    let base = ctx + 0x220 + 2 * 0x40;
+    let base = sg_av + 0x220 + 2 * 0x40;
     let data = kmem.read(base, 0x20)?;
     println!("XCode6 P4 host queue (read-only), base={base:#010x}:");
     for (class, pair) in data.chunks_exact(8).enumerate() {
