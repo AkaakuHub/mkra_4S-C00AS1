@@ -1130,6 +1130,21 @@ impl ChangeChannelRequest {
 }
 
 impl Tuner {
+    pub fn set_epg_service(service_id: u16) -> io::Result<()> {
+        let tuner = Self::open_qid(0x373, MSGH_LIST)?;
+        let mut message = SysVWire::new(0x504e, 12);
+        message.put_u32(0, 0);
+        message.put_u16(4, service_id);
+        message.put_u32(8, 0xe8);
+        let rc = unsafe {
+            sys::msgsnd(tuner.msqid, &message as *const SysVWire as *const c_void, MSGSZ, sys::IPC_NOWAIT)
+        };
+        if rc < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(())
+    }
+
     /// Ask the product to change channel, exactly as its own UI layer does.
     ///
     /// This is deliberately not a frontend command: the product reacts by
