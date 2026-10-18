@@ -3,6 +3,9 @@ set -eu
 
 ROOT=/tmp/mt/ubuntu
 test -x "$ROOT/usr/local/bin/node"
+test -x "$ROOT/usr/local/bin/mkra"
+test -c "$ROOT/dev/kmem"
+test -c "$ROOT/dev/vixs/xcodedrv"
 test -r "$ROOT/opt/mirakurun/node_modules/mirakurun/lib/server.js"
 test -r "$ROOT/usr/local/etc/mirakurun/server.yml"
 test -r "$ROOT/usr/local/etc/mirakurun/tuners.yml"
