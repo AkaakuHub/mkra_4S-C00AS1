@@ -3,12 +3,14 @@ use std::{
     io,
     sync::{
         atomic::{AtomicBool, Ordering},
-        mpsc::{sync_channel, Receiver, SyncSender, TrySendError},
+        mpsc::{sync_channel, Receiver, RecvTimeoutError, SyncSender, TrySendError},
         Arc,
     },
     thread::{self, JoinHandle},
+    time::Duration,
 };
 
+pub(super) const READ_TIMEOUT_MS: u32 = 200;
 const BLOCK_BYTES: usize = 188 * 1024;
 const QUEUE_BLOCKS: usize = 32;
 
@@ -44,9 +46,13 @@ impl Capture {
     }
 
     pub(super) fn read(&mut self) -> io::Result<Vec<u8>> {
-        match self.blocks.recv() {
+        match self
+            .blocks
+            .recv_timeout(Duration::from_millis(u64::from(READ_TIMEOUT_MS)))
+        {
             Ok(block) => Ok(block),
-            Err(_) => {
+            Err(RecvTimeoutError::Timeout) => Ok(Vec::new()),
+            Err(RecvTimeoutError::Disconnected) => {
                 self.join()?;
                 Err(io::Error::new(
                     io::ErrorKind::UnexpectedEof,
@@ -99,7 +105,7 @@ fn enqueue(
 }
 
 fn run(
-    mut reader: XcReaderSource,
+    mut reader: impl TsSource,
     sender: SyncSender<Vec<u8>>,
     free: Receiver<Vec<u8>>,
     stop: &AtomicBool,
@@ -113,23 +119,6 @@ fn run(
             scratch.clear();
             reader.read_into(&mut scratch)?;
             captured_bytes += scratch.len() as u64;
-            if scratch.is_empty() {
-                let complete = block.len() / 188 * 188;
-                if complete > 0 {
-                    let remainder = block.split_off(complete);
-                    let Some(next) = enqueue(&sender, &free, block, &mut dropped_packets) else {
-                        return Ok(());
-                    };
-                    block = next;
-                    block.extend_from_slice(&remainder);
-                } else if matches!(
-                    sender.try_send(Vec::new()),
-                    Err(TrySendError::Disconnected(_))
-                ) {
-                    return Ok(());
-                }
-                continue;
-            }
             let mut bytes = scratch.as_slice();
             while !bytes.is_empty() {
                 let take = (BLOCK_BYTES - block.len()).min(bytes.len());
@@ -150,4 +139,47 @@ fn run(
         captured_bytes / 188
     );
     result
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::VecDeque;
+
+    struct IntermittentSource(VecDeque<Vec<u8>>);
+
+    impl TsSource for IntermittentSource {
+        fn read_into(&mut self, out: &mut Vec<u8>) -> io::Result<usize> {
+            let bytes = self
+                .0
+                .pop_front()
+                .ok_or_else(|| io::Error::from(io::ErrorKind::UnexpectedEof))?;
+            out.extend_from_slice(&bytes);
+            Ok(bytes.len())
+        }
+
+        fn describe(&self) -> String {
+            "intermittent source".into()
+        }
+    }
+
+    #[test]
+    fn idle_reads_do_not_fragment_capture_queue() {
+        let chunks: VecDeque<_> = (0..1024)
+            .flat_map(|i| [vec![i as u8; 188], Vec::new()])
+            .collect();
+        let expected: Vec<_> = chunks.iter().flatten().copied().collect();
+        let (sender, receiver) = sync_channel(QUEUE_BLOCKS);
+        let (_recycle, free) = sync_channel(1);
+        let result = run(
+            IntermittentSource(chunks),
+            sender,
+            free,
+            &AtomicBool::new(false),
+        );
+        assert_eq!(result.unwrap_err().kind(), io::ErrorKind::UnexpectedEof);
+        let blocks: Vec<_> = receiver.into_iter().collect();
+        assert_eq!(blocks.len(), 1);
+        assert_eq!(blocks, vec![expected]);
+    }
 }

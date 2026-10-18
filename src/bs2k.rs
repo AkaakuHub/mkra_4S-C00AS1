@@ -145,7 +145,7 @@ impl Source {
         source.capture = Some(Capture::start(XcReaderSource::attach(
             Arc::clone(&source.drv),
             source.buffer,
-            200,
+            capture::READ_TIMEOUT_MS,
         )?)?);
         source
             .drv
