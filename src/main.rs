@@ -1266,7 +1266,16 @@ fn cmd_serve(opts: &Options) -> i32 {
         eprintln!("mkra: --idle-sleep requires --bs2k");
         return 2;
     }
-    let resume_required = Arc::new(AtomicBool::new(false));
+    let sleeping = if opts.bs2k {
+        match power::is_sleeping() {
+            Ok(value) => value,
+            Err(e) => {
+                eprintln!("mkra: cannot read receiver power state: {e}");
+                return 1;
+            }
+        }
+    } else { false };
+    let resume_required = Arc::new(AtomicBool::new(sleeping));
     let cleanup_failed = Arc::new(AtomicBool::new(false));
 
     // Decide the TS backend once, up front, so the operator learns immediately
