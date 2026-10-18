@@ -3089,11 +3089,15 @@ fn cmd_demux_core(opts: &Options) -> i32 {
         eprintln!("mkra: demux needs --out <path>");
         return 2;
     };
-    let mut file = match std::fs::File::create(&out) {
-        Ok(file) => file,
-        Err(e) => {
-            eprintln!("mkra: cannot create {out}: {e}");
-            return 1;
+    let mut file: Box<dyn Write> = if out == "-" {
+        Box::new(io::stdout())
+    } else {
+        match std::fs::File::create(&out) {
+            Ok(file) => Box::new(file),
+            Err(e) => {
+                eprintln!("mkra: cannot create {out}: {e}");
+                return 1;
+            }
         }
     };
     let drv = match XcDrv::open_path(&opts.dev) {
