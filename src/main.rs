@@ -1645,13 +1645,13 @@ fn cmd_serve(opts: &Options) -> i32 {
         state.table.channels.len()
     );
 
-    if let (Some(path), Some(loaded), Some(base)) =
-        (&opts.isdbs_channels, isdbs_loaded, isdbs_base)
-    {
+    let channel_file = opts.isdbs_channels.clone().zip(isdbs_loaded).zip(isdbs_base)
+        .map(|((path, loaded), base)| channel_sync::ChannelFile { path, loaded, base });
+    if channel_file.is_some() || (opts.bs2k && cfg!(feature = "software-cas")) {
         if let Err(error) = channel_sync::start(
-            path.clone(), loaded, base, Arc::clone(&broker), cleanup_failed,
+            channel_file, Arc::clone(&broker), cleanup_failed,
         ) {
-            eprintln!("mkra: cannot start ISDB-S channel table synchronization: {error}");
+            eprintln!("mkra: cannot start receiver configuration synchronization: {error}");
             return 1;
         }
     }
