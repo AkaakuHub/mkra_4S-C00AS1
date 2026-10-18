@@ -21,6 +21,8 @@ use crate::si::{Program, SiDb};
 use crate::stream::{Broker, SubscribeError};
 use crate::sys;
 
+mod program_sections;
+
 /// Reported by `/api/version` as `current`.
 ///
 /// Clients gate features on the Mirakurun version they think they are talking
@@ -138,6 +140,11 @@ impl AppState {
     ///
     /// Returns (sections accepted this pass, total programs known).
     pub fn merge_ring_si(&self, chunks: &[Vec<u8>]) -> (usize, usize) {
+        let selected = self.broker.current().and_then(|session| {
+            self.table.channels.iter().find(|channel| channel.key == session.channel_key)
+                .and_then(|channel| channel.services.first())
+                .map(|service| (service.network_id, service.service_id))
+        });
         let sections: Vec<_> = chunks
             .iter()
             .flat_map(|chunk| crate::si::ring_sections(chunk))
@@ -147,6 +154,12 @@ impl AppState {
         };
         for section in &sections {
             db.ingest_section(section);
+            if section.len() >= 18 && selected == Some((
+                u16::from_be_bytes([section[10], section[11]]),
+                u16::from_be_bytes([section[3], section[4]]),
+            )) {
+                db.cache_schedule_section(section, sys::unix_time_ms() as i64);
+            }
         }
         (sections.len(), db.programs.len())
     }
@@ -555,6 +568,19 @@ pub fn route(state: &AppState, req: &Request) -> Route {
                     a.obj(|o| write_program(o, p));
                 }
             }))
+        }
+
+        ["api", "services", id, "program-sections"] => {
+            let Some((_, svc)) = id.parse::<u64>().ok().and_then(|v| state.table.find_service(v)) else {
+                return err(404, "service not found");
+            };
+            let sections: Vec<_> = match state.epg.read() {
+                Ok(db) => db.schedule_sections.iter()
+                    .filter(|((nid, sid, _, _), _)| (*nid, *sid) == (svc.network_id, svc.service_id))
+                    .map(|(_, section)| section.clone()).collect(),
+                Err(_) => return err(500, "EPG unavailable"),
+            };
+            json_ok(program_sections::render(&sections))
         }
 
         ["api", "services", id, "programs"] => {
