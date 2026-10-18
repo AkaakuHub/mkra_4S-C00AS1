@@ -312,9 +312,16 @@ impl NativeCard {
         let len = section.len() - 12 + 6;
         self.transaction(|req, rep| {
             let data = send_apdu(req, rep, &apdu[..len])?;
-            if data.len() != 25 || data[4..6] != [8, 0] {
-                return Err(fail(
-                    "ECM not entitled/unsupported response (requires 0800)",
+            if data.len() != 25 {
+                return Err(fail("unexpected ECM response length"));
+            }
+            if data[4..6] != [8, 0] {
+                return Err(io::Error::new(
+                    io::ErrorKind::PermissionDenied,
+                    format!(
+                        "ECM rejected with return code {:04X}",
+                        u16::from_be_bytes([data[4], data[5]])
+                    ),
                 ));
             }
             Ok([
