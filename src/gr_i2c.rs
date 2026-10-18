@@ -649,7 +649,7 @@ mod arm_linux {
         }
     }
 
-    pub fn with_isdbs_serial_route<F>(capture: F) -> io::Result<()>
+    pub fn with_isdbs_serial_route<F>(capture: F, vendor_base: bool) -> io::Result<()>
     where
         F: FnOnce() -> io::Result<()>,
     {
@@ -660,7 +660,7 @@ mod arm_linux {
             if lock & 0x20 == 0 {
                 return Err(io::Error::other(format!("ISDB-S is not locked: {lock:02x}")));
             }
-            let changes = [
+            let mut changes = vec![
                 (0x16, 0x08, 0x01, 0xff),
                 (0x16, 0x09, 0x11, 0x00),
                 (0x16, 0x0a, 0xff, 0x80),
@@ -673,6 +673,14 @@ mod arm_linux {
                 (0x10, 0x16, 0x00, 0x21),
                 (0x10, 0xcc, 0xc0, 0x80),
             ];
+            if vendor_base {
+                changes.extend([
+                    (0x17, 0x73, 0x03, 0x24),
+                    (0x17, 0x75, 0x01, 0x00),
+                    (0x17, 0x7b, 0x67, 0x64),
+                    (0x17, 0x7d, 0x81, 0x01),
+                ]);
+            }
             for &(addr, reg, before, _) in &changes {
                 let actual = bus.read(addr, reg, 1)?[0];
                 if actual != before {
@@ -1081,7 +1089,7 @@ pub use arm_linux::{
 };
 
 #[cfg(not(all(target_os = "linux", target_arch = "arm")))]
-pub fn with_isdbs_serial_route<F>(_capture: F) -> std::io::Result<()>
+pub fn with_isdbs_serial_route<F>(_capture: F, _vendor_base: bool) -> std::io::Result<()>
 where
     F: FnOnce() -> std::io::Result<()>,
 {

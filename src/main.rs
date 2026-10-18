@@ -96,6 +96,7 @@ USAGE:
   mkra dmd-doset-route-probe
   mkra dmd-doset-t-route-probe
   mkra dmd-serial-route-probe --out <path> --seconds <1..8> --tsi-port <0|1> [--tsi-logical-port <0|1>]
+  mkra dmd-serial-base-route-probe --out <path> --seconds <1..8> --tsi-port <0|1> [--tsi-logical-port <0|1>]
   mkra dmd-tsset2-probe --out <path> --seconds <1..8> --tsi-port <0|1> [--tsi-logical-port <0|1>]
   mkra dmd-tsa-probe
   mkra dmd-tsout-base | dmd-tsout-tlv
@@ -387,8 +388,9 @@ fn main() {
         "dmd-doset-probe" => cmd_dmd_doset_probe(false, false),
         "dmd-doset-route-probe" => cmd_dmd_doset_probe(true, false),
         "dmd-doset-t-route-probe" => cmd_dmd_doset_probe(true, true),
-        "dmd-serial-route-probe" => cmd_dmd_output_probe(&opts, false),
-        "dmd-tsset2-probe" => cmd_dmd_output_probe(&opts, true),
+        "dmd-serial-route-probe" => cmd_dmd_output_probe(&opts, false, false),
+        "dmd-serial-base-route-probe" => cmd_dmd_output_probe(&opts, false, true),
+        "dmd-tsset2-probe" => cmd_dmd_output_probe(&opts, true, false),
         "dmd-tsa-probe" => cmd_dmd_hiz_probe(true),
         "dmd-tsout-base" => cmd_dmd_tsout(gr_i2c::TsoutTarget::Base),
         "dmd-tsout-tlv" => cmd_dmd_tsout(gr_i2c::TsoutTarget::TlvSpi1Bit),
@@ -562,7 +564,7 @@ fn cmd_dmd_doset_probe(route_a: bool, doset_t_enabled: bool) -> i32 {
     }
 }
 
-fn cmd_dmd_output_probe(opts: &Options, tsset2_only: bool) -> i32 {
+fn cmd_dmd_output_probe(opts: &Options, tsset2_only: bool, vendor_base: bool) -> i32 {
     if opts.out.is_none()
         || opts.tsi_port > 1
         || opts.demux_no_filter
@@ -583,7 +585,7 @@ fn cmd_dmd_output_probe(opts: &Options, tsset2_only: bool) -> i32 {
     let result = if tsset2_only {
         gr_i2c::with_isdbs_tsset2(capture)
     } else {
-        gr_i2c::with_isdbs_serial_route(capture)
+        gr_i2c::with_isdbs_serial_route(capture, vendor_base)
     };
     match result {
         Ok(()) => 0,
