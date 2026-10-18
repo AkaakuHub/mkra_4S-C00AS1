@@ -16,6 +16,9 @@
 //! Field *names* come from the vendor's own debug format strings, not from
 //! guesswork.  Anything still unverified is called out in a comment.
 
+mod mappings;
+
+use mappings::DeviceMappings;
 use std::ffi::c_void;
 use std::fs::{File, OpenOptions};
 use std::io;
@@ -557,12 +560,18 @@ impl Chunk {
 
 pub struct XcDrv {
     file: File,
+    mappings: DeviceMappings,
 }
 
 impl XcDrv {
     pub fn open_path(path: &str) -> io::Result<Self> {
         let file = OpenOptions::new().read(true).write(true).open(path)?;
-        Ok(XcDrv { file })
+        let mappings = DeviceMappings::read(&file)?;
+        Ok(XcDrv { file, mappings })
+    }
+
+    pub fn user_mapping_contains(&self, addr: u32, len: usize) -> bool {
+        self.mappings.contains(addr, len)
     }
 
     fn fd(&self) -> c_int {
@@ -1313,6 +1322,9 @@ impl XcDrv {
     }
 
     pub fn unmap(&self, vaddr: u32, size: u32) -> io::Result<()> {
+        if self.mappings.overlaps(vaddr, size) {
+            return Err(io::Error::other("refusing to unmap an initial driver mapping"));
+        }
         let mut req = ReqMemUnmap { size, vaddr };
         unsafe { self.call(MEM_UNMAP, &mut req)? };
         Ok(())

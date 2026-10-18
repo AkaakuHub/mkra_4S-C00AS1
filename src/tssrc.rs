@@ -139,9 +139,9 @@ impl XcReaderSource {
     /// reply directly, without mapping, which only works for the latter.
     /// Mapping a value that is already a user pointer reads unrelated physical
     /// memory and returns convincing-looking rubbish, so the two cases are
-    /// separated by asking the kernel which one this is.
+    /// separated using the driver's shared mappings verified when it was opened.
     fn copy_piece(&mut self, addr: u32, len: usize, out: &mut Vec<u8>) -> io::Result<()> {
-        if crate::sys::user_mapping_contains(addr, len) {
+        if self.drv.user_mapping_contains(addr, len) {
             let src = unsafe { std::slice::from_raw_parts(addr as *const u8, len) };
             out.extend_from_slice(src);
             return Ok(());
