@@ -1,9 +1,13 @@
 //! Streaming PSI/ECM tracking and CPU MULTI2. No keys are logged or written.
-use crate::{cas::NativeCard, multi2};
+use crate::{
+    cas::{EcmRejected, NativeCard},
+    multi2,
+};
 use std::{
     collections::{BTreeMap, BTreeSet, VecDeque},
     io,
 };
+const STARTUP_PACKETS: usize = 22_000;
 fn bad(s: &str) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, s)
 }
@@ -91,8 +95,24 @@ impl Sections {
     }
 }
 fn payload(p: &[u8]) -> io::Result<Option<usize>> {
-    if p.len() != 188 || p[0] != 0x47 || p[1] & 0x80 != 0 || p[3] & 0x30 == 0 {
-        return Err(bad("TS sync/TEI/header invalid"));
+    if p.len() != 188 {
+        return Err(bad("TS packet length invalid"));
+    }
+    if p[0] != 0x47 {
+        return Err(bad(&format!("TS sync invalid: header={:02X?}", &p[..4])));
+    }
+    let pid = (((p[1] & 31) as u16) << 8) | p[2] as u16;
+    if p[1] & 0x80 != 0 {
+        return Err(bad(&format!(
+            "TS transport error: PID={pid:#x} header={:02X?}",
+            &p[..4]
+        )));
+    }
+    if p[3] & 0x30 == 0 {
+        return Err(bad(&format!(
+            "TS adaptation control invalid: PID={pid:#x} header={:02X?}",
+            &p[..4]
+        )));
     }
     let off = if p[3] & 0x20 != 0 {
         5 + p[4] as usize
@@ -100,7 +120,10 @@ fn payload(p: &[u8]) -> io::Result<Option<usize>> {
         4
     };
     if off > 188 {
-        return Err(bad("TS adaptation bounds"));
+        return Err(bad(&format!(
+            "TS adaptation bounds: PID={pid:#x} header={:02X?}",
+            &p[..4]
+        )));
     }
     Ok(if p[3] & 0x10 != 0 && off < 188 {
         Some(off)
@@ -140,18 +163,19 @@ pub struct Decoder<C: Card> {
     system: [u8; 32],
     iv: [u8; 8],
     tsid: u16,
-    wanted_service: Option<u16>,
-    wanted_pmt: Option<u16>,
+    full_multiplex: bool,
     sections: BTreeMap<u16, Sections>,
     pmts: BTreeSet<u16>,
     seen_pmts: BTreeSet<u16>,
     routes: BTreeMap<u16, u16>,
     keys: BTreeMap<u16, Key>,
+    rejected: BTreeMap<u16, Vec<u8>>,
     fragment: Vec<u8>,
     waiting: VecDeque<[u8; 188]>,
     pat: bool,
     started: bool,
     scrambled_pids: BTreeSet<u16>,
+    transport_errors: u64,
     pub packets: u64,
     pub decrypted: u64,
     pub updates: u64,
@@ -164,26 +188,27 @@ impl<C: Card> Decoder<C> {
             system,
             iv,
             tsid,
-            wanted_service: None,
-            wanted_pmt: None,
+            full_multiplex: false,
             sections: BTreeMap::from([(0, Sections::default())]),
             pmts: BTreeSet::new(),
             seen_pmts: BTreeSet::new(),
             routes: BTreeMap::new(),
             keys: BTreeMap::new(),
+            rejected: BTreeMap::new(),
             fragment: Vec::new(),
             waiting: VecDeque::new(),
             pat: false,
             started: false,
             scrambled_pids: BTreeSet::new(),
+            transport_errors: 0,
             packets: 0,
             decrypted: 0,
             updates: 0,
             encrypted_passthrough: BTreeMap::new(),
         }
     }
-    pub fn select_service(mut self, service: u16) -> Self {
-        self.wanted_service = Some(service);
+    pub fn full_multiplex(mut self) -> Self {
+        self.full_multiplex = true;
         self
     }
     fn section(&mut self, pid: u16, s: Vec<u8>) -> io::Result<()> {
@@ -202,18 +227,11 @@ impl<C: Card> Decoder<C> {
                 return Err(bad("multi-section PAT unsupported"));
             }
             let mut pmts = BTreeSet::new();
-            self.wanted_pmt = None;
             for r in s[8..s.len() - 4].chunks_exact(4) {
                 if r[..2] != [0, 0] {
                     let pmt = (((r[2] & 31) as u16) << 8) | r[3] as u16;
                     pmts.insert(pmt);
-                    if self.wanted_service == Some(u16::from_be_bytes([r[0], r[1]])) {
-                        self.wanted_pmt = Some(pmt);
-                    }
                 }
-            }
-            if self.wanted_service.is_some() && self.wanted_pmt.is_none() {
-                return Err(bad("requested service is absent from received PAT"));
             }
             if pmts.is_empty() || pmts.len() > 64 {
                 return Err(bad("PAT program bounds"));
@@ -229,13 +247,6 @@ impl<C: Card> Decoder<C> {
         } else if self.pmts.contains(&pid) && s[0] == 2 {
             if s.len() < 16 {
                 return Err(bad("PMT too short"));
-            }
-            if self.wanted_pmt == Some(pid)
-                && self.wanted_service != Some(u16::from_be_bytes([s[3], s[4]]))
-            {
-                return Err(bad(
-                    "requested PAT service differs from received PMT service",
-                ));
             }
             if s[5] & 1 == 0 {
                 return Ok(());
@@ -276,7 +287,24 @@ impl<C: Card> Decoder<C> {
             if self.keys.get(&pid).is_some_and(|k| k.section == s) {
                 return Ok(());
             }
-            let controls = self.card.ecm(&s)?;
+            if self.rejected.get(&pid).is_some_and(|section| section == &s) {
+                return Ok(());
+            }
+            let controls = match self.card.ecm(&s) {
+                Ok(controls) => controls,
+                Err(error)
+                    if error
+                        .get_ref()
+                        .is_some_and(|cause| cause.is::<EcmRejected>()) =>
+                {
+                    self.keys.remove(&pid);
+                    self.rejected.insert(pid, s);
+                    eprintln!("mkra: ECM PID {pid:#x}: {error}; preserving encrypted packets");
+                    return Ok(());
+                }
+                Err(error) => return Err(error),
+            };
+            self.rejected.remove(&pid);
             let work = [
                 multi2::schedule(&self.system, &controls[0]),
                 multi2::schedule(&self.system, &controls[1]),
@@ -308,11 +336,11 @@ impl<C: Card> Decoder<C> {
             let pid = (((p[1] & 31) as u16) << 8) | p[2] as u16;
             // Full multiplexes can contain scrambled data PIDs absent from
             // the active PMTs (measured 0x4e0/0x4e1 on BS1). A sole ECM domain
-            // is unambiguous. Selected-service sessions preserve unassociated
+            // is unambiguous. Live sessions preserve unassociated
             // ciphertext and flags; strict diagnostics reject ambiguity.
             let ecm = match self.ecm_for_pid(pid) {
                 Some(ecm) => ecm,
-                None if self.wanted_service.is_some() && !self.routes.contains_key(&pid) => {
+                None if self.full_multiplex && !self.routes.contains_key(&pid) => {
                     // An unfiltered multiplex may include ancillary PIDs whose
                     // PMT is off-air. Preserve ciphertext AND its scrambling
                     // flag rather than guessing a key or ending the main service.
@@ -323,10 +351,16 @@ impl<C: Card> Decoder<C> {
                 }
                 None => return Err(bad("scrambled PID has ambiguous/missing ECM routing")),
             };
-            let key = self
-                .keys
-                .get(&ecm)
-                .ok_or_else(|| bad("scrambled PID has no accepted ECM"))?;
+            let key = match self.keys.get(&ecm) {
+                Some(key) => key,
+                None if self.full_multiplex || self.rejected.contains_key(&ecm) => {
+                    *self.encrypted_passthrough.entry(pid).or_default() += 1;
+                    out.extend_from_slice(&p);
+                    self.packets += 1;
+                    return Ok(());
+                }
+                None => return Err(bad("scrambled PID has no accepted ECM")),
+            };
             if let Some(offset) = payload(&p)? {
                 multi2::decrypt(
                     &mut p[offset..],
@@ -346,8 +380,24 @@ impl<C: Card> Decoder<C> {
         let count = self.fragment.len() / 188;
         for i in 0..count {
             let p: [u8; 188] = self.fragment[i * 188..(i + 1) * 188].try_into().unwrap();
-            let offset = payload(&p)?;
             let pid = (((p[1] & 31) as u16) << 8) | p[2] as u16;
+            let offset = match payload(&p) {
+                Ok(offset) => offset,
+                Err(error) if p[0] == 0x47 => {
+                    if let Some(assembler) = self.sections.get_mut(&pid) {
+                        *assembler = Sections::default();
+                    }
+                    self.transport_errors += 1;
+                    if self.transport_errors.is_power_of_two() {
+                        eprintln!(
+                            "mkra: discarded invalid TS packet: count={} {error}",
+                            self.transport_errors,
+                        );
+                    }
+                    continue;
+                }
+                Err(error) => return Err(error),
+            };
             if p[3] >> 6 == 0 {
                 if let (Some(offset), Some(assembler)) = (offset, self.sections.get_mut(&pid)) {
                     let ss = assembler.push(&p, offset)?;
@@ -361,25 +411,43 @@ impl<C: Card> Decoder<C> {
                 if p[3] >> 6 != 0 {
                     self.scrambled_pids.insert(pid);
                 }
-                if self.waiting.len() > 22_000 {
+                if self.waiting.len() > STARTUP_PACKETS && (!self.full_multiplex || !self.pat) {
                     return Err(io::Error::new(io::ErrorKind::InvalidData,format!(
                         "BS2K startup exceeded 4 MiB: PMTs={:?} seen={:?} ECMs={:?} accepted={:?} scrambled_PIDs={:?}",
                         self.pmts,self.seen_pmts,self.routes.values().collect::<BTreeSet<_>>(),self.keys.keys().collect::<Vec<_>>(),self.scrambled_pids)));
                 }
                 if self.pat
-                    && self.wanted_pmt.map_or(self.pmts == self.seen_pmts, |pid| {
-                        self.seen_pmts.contains(&pid)
-                    })
-                    && (self.routes.is_empty() || !self.keys.is_empty())
-                    && if self.scrambled_pids.is_empty() {
-                        self.routes.values().all(|pid| self.keys.contains_key(pid))
+                    && if self.full_multiplex {
+                        let ready = self.pmts == self.seen_pmts
+                            && self.routes.values().all(|pid| {
+                                self.keys.contains_key(pid) || self.rejected.contains_key(pid)
+                            });
+                        let full = self.waiting.len() >= STARTUP_PACKETS;
+                        if !ready && full {
+                            eprintln!("mkra: multiplex startup reached packet buffer limit; unresolved PMTs={}, CA routes={}; retaining encrypted packets",
+                                self.pmts.difference(&self.seen_pmts).count(),
+                                self.routes.values().filter(|pid| !self.keys.contains_key(pid) && !self.rejected.contains_key(pid)).count());
+                        }
+                        ready || full
                     } else {
-                        self.scrambled_pids.iter().all(|&pid| {
-                            self.ecm_for_pid(pid).map_or(
-                                self.wanted_service.is_some() && !self.routes.contains_key(&pid),
-                                |ecm| self.keys.contains_key(&ecm),
-                            )
-                        })
+                        self.pmts == self.seen_pmts && {
+                            (self.routes.is_empty()
+                                || !self.keys.is_empty()
+                                || !self.rejected.is_empty())
+                                && if self.scrambled_pids.is_empty() {
+                                    self.routes.values().all(|pid| {
+                                        self.keys.contains_key(pid)
+                                            || self.rejected.contains_key(pid)
+                                    })
+                                } else {
+                                    self.scrambled_pids.iter().all(|&pid| {
+                                        self.ecm_for_pid(pid).is_some_and(|ecm| {
+                                            self.keys.contains_key(&ecm)
+                                                || self.rejected.contains_key(&ecm)
+                                        })
+                                    })
+                                }
+                        }
                     }
                 {
                     self.started = true;
@@ -519,22 +587,25 @@ mod tests {
         );
     }
     #[test]
-    fn requested_service_starts_without_a_missing_unrelated_pmt() {
+    fn multiplex_starts_at_buffer_limit_with_a_missing_pmt() {
         let mut ts = tables();
         let pat = section(vec![
             0, 0xb0, 0, 0x40, 0x10, 0xc1, 0, 0, 0, 151, 0xe1, 0, 3, 0xe7, 0xe2, 0,
         ]);
         ts[0] = packet(0, 0, &pat);
-        let mut d = Decoder::new(Fake { calls: 0 }, [0; 32], [0; 8], 0x4010).select_service(151);
+        let mut d = Decoder::new(Fake { calls: 0 }, [0; 32], [0; 8], 0x4010).full_multiplex();
         let mut out = Vec::new();
         for p in &ts {
             d.push(p, &mut out).unwrap();
         }
-        assert_eq!(out.len(), 3 * 188);
+        assert!(out.is_empty());
+        let mut null = [0xff; 188];
+        null[..4].copy_from_slice(&[0x47, 0x1f, 0xff, 0x10]);
+        for _ in 3..STARTUP_PACKETS {
+            d.push(&null, &mut out).unwrap();
+        }
+        assert_eq!(out.len(), STARTUP_PACKETS * 188);
         assert_eq!(d.card.calls, 1);
-        let mut wrong =
-            Decoder::new(Fake { calls: 0 }, [0; 32], [0; 8], 0x4010).select_service(152);
-        assert!(wrong.push(&ts[0], &mut Vec::new()).is_err());
         let mut unknown = [0u8; 188];
         unknown[..4].copy_from_slice(&[0x47, 2, 0x10, 0x90]);
         out.clear();
@@ -542,6 +613,35 @@ mod tests {
         assert_eq!(&out, &unknown);
         assert_eq!(out[3] >> 6, 2); // Unknown ciphertext is never labelled clear.
         assert_eq!(d.encrypted_passthrough.get(&0x210), Some(&1));
+    }
+    #[test]
+    fn invalid_transport_packets_do_not_stop_valid_packets() {
+        for header in [
+            [0x47, 0x81, 0x21, 0x12, 0],
+            [0x47, 0x01, 0x21, 0x02, 0],
+            [0x47, 0x01, 0x21, 0x32, 184],
+        ] {
+            let mut d = Decoder::new(Fake { calls: 0 }, [0; 32], [0; 8], 0x4010);
+            d.started = true;
+            d.sections.insert(
+                0x121,
+                Sections {
+                    bytes: vec![0x82, 0xf0],
+                    cc: Some(1),
+                },
+            );
+            let mut broken = [0xff; 188];
+            broken[..5].copy_from_slice(&header);
+            let mut valid = [0xff; 188];
+            valid[..4].copy_from_slice(&[0x47, 0x1f, 0xff, 0x10]);
+            let input = [broken.as_slice(), valid.as_slice()].concat();
+            let mut out = Vec::new();
+            d.push(&input, &mut out).unwrap();
+            assert_eq!(out, valid);
+            assert_eq!(d.transport_errors, 1);
+            assert!(d.sections[&0x121].bytes.is_empty());
+            assert_eq!(d.sections[&0x121].cc, None);
+        }
     }
     #[test]
     fn wrong_tsid_and_unknown_scrambled_pid_fail_closed() {
@@ -557,6 +657,10 @@ mod tests {
         d.routes.insert(0x142, 0x122);
         let mut p = [0u8; 188];
         p[..4].copy_from_slice(&[0x47, 2, 0, 0x90]);
+        assert!(d.push(&p, &mut out).is_err());
+        assert!(out.is_empty());
+        let mut d = Decoder::new(Fake { calls: 0 }, [0; 32], [0; 8], 0x4010);
+        p[0] = 0x46;
         assert!(d.push(&p, &mut out).is_err());
         assert!(out.is_empty());
     }

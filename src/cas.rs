@@ -45,6 +45,14 @@ fn wire(id: u32) -> Wire {
 fn fail(s: impl Into<String>) -> io::Error {
     io::Error::other(s.into())
 }
+#[derive(Debug)]
+pub(crate) struct EcmRejected(u16);
+impl std::fmt::Display for EcmRejected {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "ECM rejected with return code {:04X}", self.0)
+    }
+}
+impl std::error::Error for EcmRejected {}
 fn receive(reply: c_int, id: u32, len: u32, seconds: u64) -> io::Result<Wire> {
     let until = Instant::now() + Duration::from_secs(seconds);
     loop {
@@ -312,9 +320,17 @@ impl NativeCard {
         let len = section.len() - 12 + 6;
         self.transaction(|req, rep| {
             let data = send_apdu(req, rep, &apdu[..len])?;
-            if data.len() != 25 || data[4..6] != [8, 0] {
-                return Err(fail(
-                    "ECM not entitled/unsupported response (requires 0800)",
+            if data.len() < 25 {
+                return Err(fail(format!(
+                    "unexpected ECM response length: {}",
+                    data.len()
+                )));
+            }
+            let code = u16::from_be_bytes([data[4], data[5]]);
+            if ![0x0200, 0x0400, 0x0800].contains(&code) {
+                return Err(io::Error::new(
+                    io::ErrorKind::PermissionDenied,
+                    EcmRejected(code),
                 ));
             }
             Ok([
