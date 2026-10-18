@@ -313,7 +313,7 @@ impl NativeCard {
         self.transaction(|req, rep| {
             let data = send_apdu(req, rep, &apdu[..len])?;
             if data.len() != 25 {
-                return Err(fail("unexpected ECM response length"));
+                return Err(fail(format!("unexpected ECM response length: {}", data.len())));
             }
             if data[4..6] != [8, 0] {
                 return Err(io::Error::new(
