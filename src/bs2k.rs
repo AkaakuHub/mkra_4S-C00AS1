@@ -74,7 +74,6 @@ impl Source {
         drv: Arc<XcDrv>,
         freq: u32,
         tsid: u16,
-        service_id: u16,
         legacy: &AtomicBool,
         dirty: Arc<AtomicBool>,
     ) -> io::Result<Self> {
@@ -99,7 +98,7 @@ impl Source {
             filter: false,
             running: false,
             reader: None,
-            decoder: Decoder::new(card, system, iv, tsid).select_service(service_id),
+            decoder: Decoder::new(card, system, iv, tsid).full_multiplex(),
             scratch: Vec::new(),
             last_data: Instant::now(),
             dirty,

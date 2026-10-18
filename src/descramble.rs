@@ -7,6 +7,7 @@ use std::{
     collections::{BTreeMap, BTreeSet, VecDeque},
     io,
 };
+const STARTUP_PACKETS: usize = 22_000;
 fn bad(s: &str) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, s)
 }
@@ -144,6 +145,7 @@ pub struct Decoder<C: Card> {
     iv: [u8; 8],
     tsid: u16,
     wanted_service: Option<u16>,
+    full_multiplex: bool,
     wanted_pmt: Option<u16>,
     wanted_ecms: BTreeSet<u16>,
     sections: BTreeMap<u16, Sections>,
@@ -170,6 +172,7 @@ impl<C: Card> Decoder<C> {
             iv,
             tsid,
             wanted_service: None,
+            full_multiplex: false,
             wanted_pmt: None,
             wanted_ecms: BTreeSet::new(),
             sections: BTreeMap::from([(0, Sections::default())]),
@@ -191,6 +194,10 @@ impl<C: Card> Decoder<C> {
     }
     pub fn select_service(mut self, service: u16) -> Self {
         self.wanted_service = Some(service);
+        self
+    }
+    pub fn full_multiplex(mut self) -> Self {
+        self.full_multiplex = true;
         self
     }
     fn section(&mut self, pid: u16, s: Vec<u8>) -> io::Result<()> {
@@ -337,11 +344,13 @@ impl<C: Card> Decoder<C> {
             let pid = (((p[1] & 31) as u16) << 8) | p[2] as u16;
             // Full multiplexes can contain scrambled data PIDs absent from
             // the active PMTs (measured 0x4e0/0x4e1 on BS1). A sole ECM domain
-            // is unambiguous. Selected-service sessions preserve unassociated
+            // is unambiguous. Live sessions preserve unassociated
             // ciphertext and flags; strict diagnostics reject ambiguity.
             let ecm = match self.ecm_for_pid(pid) {
                 Some(ecm) => ecm,
-                None if self.wanted_service.is_some() && !self.routes.contains_key(&pid) => {
+                None if (self.wanted_service.is_some() || self.full_multiplex)
+                    && !self.routes.contains_key(&pid) =>
+                {
                     // An unfiltered multiplex may include ancillary PIDs whose
                     // PMT is off-air. Preserve ciphertext AND its scrambling
                     // flag rather than guessing a key or ending the main service.
@@ -354,7 +363,10 @@ impl<C: Card> Decoder<C> {
             };
             let key = match self.keys.get(&ecm) {
                 Some(key) => key,
-                None if self.wanted_service.is_some() || self.rejected.contains_key(&ecm) => {
+                None if self.wanted_service.is_some()
+                    || self.full_multiplex
+                    || self.rejected.contains_key(&ecm) =>
+                {
                     *self.encrypted_passthrough.entry(pid).or_default() += 1;
                     out.extend_from_slice(&p);
                     self.packets += 1;
@@ -396,35 +408,49 @@ impl<C: Card> Decoder<C> {
                 if p[3] >> 6 != 0 {
                     self.scrambled_pids.insert(pid);
                 }
-                if self.waiting.len() > 22_000 {
+                if self.waiting.len() > STARTUP_PACKETS && (!self.full_multiplex || !self.pat) {
                     return Err(io::Error::new(io::ErrorKind::InvalidData,format!(
                         "BS2K startup exceeded 4 MiB: PMTs={:?} seen={:?} ECMs={:?} accepted={:?} scrambled_PIDs={:?}",
                         self.pmts,self.seen_pmts,self.routes.values().collect::<BTreeSet<_>>(),self.keys.keys().collect::<Vec<_>>(),self.scrambled_pids)));
                 }
                 if self.pat
-                    && self.wanted_pmt.map_or(self.pmts == self.seen_pmts, |pid| {
-                        self.seen_pmts.contains(&pid)
-                    })
-                    && if self.wanted_service.is_some() {
-                        self.wanted_ecms.iter().all(|pid| {
-                            self.keys.contains_key(pid) || self.rejected.contains_key(pid)
-                        })
+                    && if self.full_multiplex {
+                        let ready = self.pmts == self.seen_pmts
+                            && self.routes.values().all(|pid| {
+                                self.keys.contains_key(pid) || self.rejected.contains_key(pid)
+                            });
+                        let full = self.waiting.len() >= STARTUP_PACKETS;
+                        if !ready && full {
+                            eprintln!("mkra: multiplex startup reached packet buffer limit; unresolved PMTs={}, CA routes={}; retaining encrypted packets",
+                                self.pmts.difference(&self.seen_pmts).count(),
+                                self.routes.values().filter(|pid| !self.keys.contains_key(pid) && !self.rejected.contains_key(pid)).count());
+                        }
+                        ready || full
                     } else {
-                        (self.routes.is_empty()
-                            || !self.keys.is_empty()
-                            || !self.rejected.is_empty())
-                            && if self.scrambled_pids.is_empty() {
-                                self.routes.values().all(|pid| {
-                                    self.keys.contains_key(pid) || self.rejected.contains_key(pid)
-                                })
-                            } else {
-                                self.scrambled_pids.iter().all(|&pid| {
-                                    self.ecm_for_pid(pid).is_some_and(|ecm| {
-                                        self.keys.contains_key(&ecm)
-                                            || self.rejected.contains_key(&ecm)
+                        self.wanted_pmt.map_or(self.pmts == self.seen_pmts, |pid| {
+                            self.seen_pmts.contains(&pid)
+                        }) && if self.wanted_service.is_some() {
+                            self.wanted_ecms.iter().all(|pid| {
+                                self.keys.contains_key(pid) || self.rejected.contains_key(pid)
+                            })
+                        } else {
+                            (self.routes.is_empty()
+                                || !self.keys.is_empty()
+                                || !self.rejected.is_empty())
+                                && if self.scrambled_pids.is_empty() {
+                                    self.routes.values().all(|pid| {
+                                        self.keys.contains_key(pid)
+                                            || self.rejected.contains_key(pid)
                                     })
-                                })
-                            }
+                                } else {
+                                    self.scrambled_pids.iter().all(|&pid| {
+                                        self.ecm_for_pid(pid).is_some_and(|ecm| {
+                                            self.keys.contains_key(&ecm)
+                                                || self.rejected.contains_key(&ecm)
+                                        })
+                                    })
+                                }
+                        }
                     }
                 {
                     self.started = true;

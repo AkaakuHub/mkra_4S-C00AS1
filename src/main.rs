@@ -1358,7 +1358,7 @@ fn cmd_serve(opts: &Options) -> i32 {
         }else{false}));
         let dirty=Arc::clone(&cleanup_failed);
         let unified=opts.bs2k;
-        let legacy_channels:BTreeMap<String,(u32,u16,u16)>=table.channels.iter().filter(|c|c.is_bs2k()).filter_map(|c|c.services.first().map(|s|(c.key.clone(),(c.freq_khz,c.tsid,s.service_id)))).collect();
+        let legacy_channels:BTreeMap<String,(u32,u16)>=table.channels.iter().filter(|c|c.is_bs2k()).map(|c|(c.key.clone(),(c.freq_khz,c.tsid))).collect();
         let base = remux4k::TapConfig {
             with_tsinfo: !opts.remux4k_no_tsinfo,
             es_level_abort: opts.remux4k_es_level_abort,
@@ -1375,8 +1375,8 @@ fn cmd_serve(opts: &Options) -> i32 {
         (
             Box::new(move |key: &str| {
                 if dirty.load(Ordering::SeqCst) {return Err(io::Error::other("previous cleanup failed; tuner is blocked"))}
-                if let Some(&(freq,tsid,sid))=legacy_channels.get(key) {
-                    return bs2k::Source::open(Arc::clone(&drv),freq,tsid,sid,&legacy,Arc::clone(&dirty)).map(|s| {
+                if let Some(&(freq,tsid))=legacy_channels.get(key) {
+                    return bs2k::Source::open(Arc::clone(&drv),freq,tsid,&legacy,Arc::clone(&dirty)).map(|s| {
                         resume_for_factory.store(false, Ordering::SeqCst);
                         Box::new(s) as Box<dyn TsSource>
                     });
