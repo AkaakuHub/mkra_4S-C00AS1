@@ -47,7 +47,7 @@ pub struct AppState {
     pub backend: String,
     /// EPG parsed from the product's own MMT-SI cache. Empty until
     /// `--epg-dir` is given and the box has actually acquired a schedule.
-    pub epg: RwLock<SiDb>,
+    pub epg: Arc<RwLock<SiDb>>,
 }
 
 impl AppState {
@@ -56,6 +56,7 @@ impl AppState {
         broker: Arc<Broker>,
         tuning_enabled: bool,
         backend: String,
+        epg: Arc<RwLock<SiDb>>,
     ) -> Self {
         AppState {
             table,
@@ -64,7 +65,7 @@ impl AppState {
             requests: AtomicU64::new(0),
             tuning_enabled,
             backend,
-            epg: RwLock::new(SiDb::new()),
+            epg,
         }
     }
 
@@ -794,7 +795,7 @@ mod tests {
             BrokerConfig::default(),
             Box::new(|_| Ok(Box::new(NullSource) as Box<dyn TsSource>)),
         );
-        AppState::new(ChannelTable::builtin(), broker, false, "null".into())
+        AppState::new(ChannelTable::builtin(), broker, false, "null".into(), Arc::new(RwLock::new(SiDb::new())))
     }
 
     /// Minimal structural check: balanced braces/brackets outside strings.
@@ -920,6 +921,7 @@ mod tests {
             ),
             false,
             "null".into(),
+            Arc::new(RwLock::new(SiDb::new())),
         );
         assert_eq!(s.tuner_type(), "BS4K");
         let (_, body) = render(&s, "/api/tuners");

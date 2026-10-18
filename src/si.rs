@@ -410,6 +410,7 @@ pub struct SiDb {
     pub transponders: Vec<Transponder>,
     pub services: BTreeMap<u64, SiService>,
     pub programs: BTreeMap<u64, Program>,
+    pub present_following: BTreeMap<(u16, u16, u8), Vec<u8>>,
     /// Broadcast clock from MH-TOT, Unix seconds UTC.
     pub broadcast_time: Option<i64>,
     /// Remote-control key id per service, from the TLV-NIT 0xCD descriptor.
@@ -485,6 +486,14 @@ impl SiDb {
             return;
         }
         if is_mh_eit(tid) {
+            if let Some(section) = crate::program_tables::convert_present_following(sec) {
+                let sid = u16b(sec, 3);
+                let nid = u16b(sec, 10);
+                self.present_following.retain(|(network, service, _), old| {
+                    (*network, *service) != (nid, sid) || old[5] == section[5]
+                });
+                self.present_following.insert((nid, sid, sec[6]), section);
+            }
             self.parse_mh_eit(sec);
         } else if tid == TID_MH_SDT_ACTUAL || tid == TID_MH_SDT_OTHER {
             self.parse_mh_sdt(sec);

@@ -39,6 +39,7 @@ mod http;
 mod i2c_lock;
 mod json;
 mod remux4k;
+mod program_tables;
 mod si;
 mod snapshot;
 #[cfg(feature = "software-cas")]
@@ -1288,6 +1289,8 @@ fn cmd_serve(opts: &Options) -> i32 {
 
     // Decide the TS backend once, up front, so the operator learns immediately
     // rather than at the first stream request.
+    let epg = Arc::new(std::sync::RwLock::new(si::SiDb::new()));
+    let epg_for_source = Arc::clone(&epg);
     let (factory, backend): (stream::SourceFactory, String) = if opts.test_pattern {
         // Each channel gets its own TSID/service so a client can tell them
         // apart; the table is cloned in because the factory outlives it.
@@ -1401,7 +1404,7 @@ fn cmd_serve(opts: &Options) -> i32 {
                         allow_no_decoder:true, es_level_abort:if no_decoder {101}else{base.es_level_abort}, ..base};
                     return remux4k::Tap::open(Arc::clone(&drv),cfg).map(|t| {
                         resume_for_factory.store(false, Ordering::SeqCst);
-                        Box::new(t) as Box<dyn TsSource>
+                        Box::new(t.with_epg(Arc::clone(&epg_for_source), live.original_network_id)) as Box<dyn TsSource>
                     });
                 }
                 let mut live = si::live_service(si::ADSB_SI_DIR).ok_or_else(|| {
@@ -1448,7 +1451,7 @@ fn cmd_serve(opts: &Options) -> i32 {
                     ..base
                 };
                 remux4k::Tap::open(Arc::clone(&drv), cfg)
-                    .map(|t| Box::new(t) as Box<dyn TsSource>)
+                    .map(|t| Box::new(t.with_epg(Arc::clone(&epg_for_source), live.original_network_id)) as Box<dyn TsSource>)
             }),
             if unified {"BS4K REMUX + BS2K native CAS/MULTI2 (one tuner)"}else{"BS4K REMUX tap (live MMT -> MPEG-TS)"}.to_string(),
         )
@@ -1558,6 +1561,7 @@ fn cmd_serve(opts: &Options) -> i32 {
         Arc::clone(&broker),
         opts.tune,
         backend.clone(),
+        epg,
     ));
 
     // EPG comes from the product's own MMT-SI cache, so it is independent of

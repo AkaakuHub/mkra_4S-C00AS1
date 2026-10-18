@@ -560,6 +560,7 @@ pub struct Tap {
     unwrap: TtsUnwrap,
     adts: Option<AdtsRewriter>,
     ts_scratch: Vec<u8>,
+    program_tables: Option<crate::program_tables::ProgramTables>,
     last_data: Instant,
     pub raw_total: u64,
     pub longest_gap: Duration,
@@ -584,6 +585,13 @@ pub fn verify_fresh_es(drv: &Arc<XcDrv>) -> io::Result<()> {
 }
 
 impl Tap {
+    pub fn with_epg(mut self, epg: Arc<std::sync::RwLock<crate::si::SiDb>>, network_id: u16) -> Self {
+        self.program_tables = Some(crate::program_tables::ProgramTables::new(
+            epg, network_id, self.cfg.service_id, if self.cfg.adts { 0x0f } else { AUDIO_STREAM_TYPE as u8 },
+        ));
+        self
+    }
+
     pub fn open(drv: Arc<XcDrv>, cfg: TapConfig) -> io::Result<Self> {
         let live = discover(&drv).map_err(io::Error::other)?;
         if live.video_readers == 0 || live.audio_readers == 0 {
@@ -640,6 +648,7 @@ impl Tap {
             unwrap: TtsUnwrap::new(),
             adts: cfg.adts.then(AdtsRewriter::new),
             ts_scratch: Vec::with_capacity(320 * 1024),
+            program_tables: None,
             last_data: Instant::now(),
             raw_total: 0,
             longest_gap: Duration::from_millis(0),
@@ -839,6 +848,11 @@ impl TsSource for Tap {
         }
         }
         self.raw = raw;
+        if !self.cfg.raw_output {
+            if let Some(tables) = self.program_tables.as_mut() {
+                tables.process(out, before);
+            }
+        }
         Ok(out.len() - before)
     }
 
