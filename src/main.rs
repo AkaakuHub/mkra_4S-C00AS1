@@ -3085,8 +3085,8 @@ fn cmd_demux_core(opts: &Options) -> i32 {
         eprintln!("mkra: --observe-sf-ring requires --tsi-port 0");
         return 2;
     }
-    if opts.demux_observe_tsi_route && opts.tsi_port != 0 {
-        eprintln!("mkra: --observe-tsi-route requires --tsi-port 0");
+    if opts.demux_observe_tsi_route && opts.tsi_port > 1 {
+        eprintln!("mkra: --observe-tsi-route requires --tsi-port 0 or 1");
         return 2;
     }
     let demux_pid = if opts.demux_pat_section {
