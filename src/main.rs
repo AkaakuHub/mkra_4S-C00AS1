@@ -3849,10 +3849,10 @@ fn cmd_remux4k(opts: &Options) -> i32 {
         .take(8)
         .map(|(pid, n)| format!("{pid:#06x}:{n}"))
         .collect();
-    println!(
+    eprintln!(
         "remux4k: TSOUT {raw_total} raw bytes -> {ts_total} TS bytes; 188-byte sync ratio {ratio:.4}"
     );
-    println!("remux4k: PIDs {}", top.join(" "));
+    eprintln!("remux4k: PIDs {}", top.join(" "));
     let has_video = hist
         .iter()
         .any(|(pid, n)| u32::from(*pid) == remux4k::VIDEO_PID && *n > 0);
