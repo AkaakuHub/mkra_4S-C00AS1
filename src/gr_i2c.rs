@@ -778,6 +778,56 @@ mod arm_linux {
         }
     }
 
+    pub fn with_isdbs_route_a_only<F>(capture: F) -> io::Result<()>
+    where
+        F: FnOnce() -> io::Result<()>,
+    {
+        let guard = I2c0Guard::attach_and_take()?;
+        let bus = I2c0::open()?;
+        let result = (|| -> io::Result<()> {
+            let lock = bus.read(0x12, 0x5e, 1)?[0];
+            let pin = bus.read(0x10, 0x0b, 1)?[0];
+            let selector = bus.read(0x10, 0xcc, 1)?[0];
+            let route1 = bus.read(0x16, 0x05, 1)?[0];
+            let route3 = bus.read(0x16, 0x07, 1)?[0];
+            if lock & 0x20 == 0 || pin != 1 || selector != 0xc0 || (route1, route3) != (0, 0) {
+                return Err(io::Error::other(format!(
+                    "refuse route-A-only probe: lock={lock:02x} pin={pin:02x} selector={selector:02x} route={route1:02x}/{route3:02x}"
+                )));
+            }
+            let applied = bus.write(0x16, 0x05, &[0x0c]).and_then(|()| {
+                bus.write(0x16, 0x07, &[0x60])?;
+                let active1 = bus.read(0x16, 0x05, 1)?[0];
+                let active3 = bus.read(0x16, 0x07, 1)?[0];
+                if (active1, active3) != (0x0c, 0x60) {
+                    return Err(io::Error::other(format!(
+                        "route-A-only readback {active1:02x}/{active3:02x}"
+                    )));
+                }
+                capture()
+            });
+            let restore3 = bus.write(0x16, 0x07, &[route3]);
+            let restore1 = bus.write(0x16, 0x05, &[route1]);
+            restore3?;
+            restore1?;
+            let after1 = bus.read(0x16, 0x05, 1)?[0];
+            let after3 = bus.read(0x16, 0x07, 1)?[0];
+            if (after1, after3) != (route1, route3) {
+                return Err(io::Error::other(format!(
+                    "route-A-only restore readback {after1:02x}/{after3:02x}"
+                )));
+            }
+            eprintln!("route-A-only selectors restored and verified");
+            applied
+        })();
+        let release = guard.release();
+        match (result, release) {
+            (Err(e), _) => Err(e),
+            (Ok(_), Err(e)) => Err(e),
+            (Ok(()), Ok(())) => Ok(()),
+        }
+    }
+
     /// Install one of the two documented output-framing states on bank 7.
     ///
     /// Gate 5C1 measured that switching the unit from ISDB-S3 to ISDB-S leaves
@@ -1085,8 +1135,19 @@ pub use arm_linux::{
     make_isdbs_ts_output_exclusive, quiesce_ts_output, read_isdbs_status, read_isdbs_tmcc_tsids, read_output_regs,
     select_tlv_output_exclusive, set_tsout_framing, set_tsout_interface, snapshot_watchlist,
     standby_isdbt, tune, probe_hiz, probe_doset,
-    with_isdbs_serial_route, with_isdbs_tsset2,
+    with_isdbs_serial_route, with_isdbs_tsset2, with_isdbs_route_a_only,
 };
+
+#[cfg(not(all(target_os = "linux", target_arch = "arm")))]
+pub fn with_isdbs_route_a_only<F>(_capture: F) -> std::io::Result<()>
+where
+    F: FnOnce() -> std::io::Result<()>,
+{
+    Err(std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        "SC1501A route-A-only probe is available only in the ARM device build",
+    ))
+}
 
 #[cfg(not(all(target_os = "linux", target_arch = "arm")))]
 pub fn with_isdbs_serial_route<F>(_capture: F, _vendor_base: bool) -> std::io::Result<()>

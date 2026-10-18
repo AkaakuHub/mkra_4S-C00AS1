@@ -99,6 +99,7 @@ USAGE:
   mkra dmd-serial-route-probe --out <path> --seconds <1..8> --tsi-port <0|1> [--tsi-logical-port <0|1>]
   mkra dmd-serial-base-route-probe --out <path> --seconds <1..8> --tsi-port <0|1> [--tsi-logical-port <0|1>]
   mkra dmd-tsset2-probe --out <path> --seconds <1..8> --tsi-port <0|1> [--tsi-logical-port <0|1>]
+  mkra dmd-route-a-only-probe --out <path> --seconds <1..8> --tsi-port <0|1> [--tsi-logical-port <0|1>]
   mkra dmd-tsa-probe
   mkra dmd-tsout-base | dmd-tsout-tlv
   mkra dmd-iface-serial | dmd-iface-isdbs | dmd-quiesce
@@ -390,9 +391,10 @@ fn main() {
         "dmd-doset-probe" => cmd_dmd_doset_probe(false, false),
         "dmd-doset-route-probe" => cmd_dmd_doset_probe(true, false),
         "dmd-doset-t-route-probe" => cmd_dmd_doset_probe(true, true),
-        "dmd-serial-route-probe" => cmd_dmd_output_probe(&opts, false, false),
-        "dmd-serial-base-route-probe" => cmd_dmd_output_probe(&opts, false, true),
-        "dmd-tsset2-probe" => cmd_dmd_output_probe(&opts, true, false),
+        "dmd-serial-route-probe" => cmd_dmd_output_probe(&opts, DmdOutputProbe::SerialRoute),
+        "dmd-serial-base-route-probe" => cmd_dmd_output_probe(&opts, DmdOutputProbe::SerialBaseRoute),
+        "dmd-tsset2-probe" => cmd_dmd_output_probe(&opts, DmdOutputProbe::Tsset2),
+        "dmd-route-a-only-probe" => cmd_dmd_output_probe(&opts, DmdOutputProbe::RouteAOnly),
         "dmd-tsa-probe" => cmd_dmd_hiz_probe(true),
         "dmd-tsout-base" => cmd_dmd_tsout(gr_i2c::TsoutTarget::Base),
         "dmd-tsout-tlv" => cmd_dmd_tsout(gr_i2c::TsoutTarget::TlvSpi1Bit),
@@ -566,7 +568,14 @@ fn cmd_dmd_doset_probe(route_a: bool, doset_t_enabled: bool) -> i32 {
     }
 }
 
-fn cmd_dmd_output_probe(opts: &Options, tsset2_only: bool, vendor_base: bool) -> i32 {
+enum DmdOutputProbe {
+    SerialRoute,
+    SerialBaseRoute,
+    Tsset2,
+    RouteAOnly,
+}
+
+fn cmd_dmd_output_probe(opts: &Options, probe: DmdOutputProbe) -> i32 {
     if opts.out.is_none()
         || opts.tsi_port > 1
         || opts.demux_no_filter
@@ -584,10 +593,11 @@ fn cmd_dmd_output_probe(opts: &Options, tsset2_only: bool, vendor_base: bool) ->
             Err(io::Error::other("DEMUX capture failed"))
         }
     };
-    let result = if tsset2_only {
-        gr_i2c::with_isdbs_tsset2(capture)
-    } else {
-        gr_i2c::with_isdbs_serial_route(capture, vendor_base)
+    let result = match probe {
+        DmdOutputProbe::SerialRoute => gr_i2c::with_isdbs_serial_route(capture, false),
+        DmdOutputProbe::SerialBaseRoute => gr_i2c::with_isdbs_serial_route(capture, true),
+        DmdOutputProbe::Tsset2 => gr_i2c::with_isdbs_tsset2(capture),
+        DmdOutputProbe::RouteAOnly => gr_i2c::with_isdbs_route_a_only(capture),
     };
     match result {
         Ok(()) => 0,
