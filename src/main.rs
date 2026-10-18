@@ -89,7 +89,6 @@ USAGE:
   mkra tsi-edge-restore
   mkra tsi-edge-status-probe
   mkra tsi1-baseline-signal-probe
-  mkra tsi1-crossbar-probe
   mkra isdbs-tmcc-tsids
   mkra isdbs-ts-exclusive
   mkra dmd-regs
@@ -384,8 +383,7 @@ fn main() {
         "tsi-crossbar-restore" => cmd_tsi_crossbar_restore(),
         "tsi-edge-restore" => cmd_tsi_edge_restore(),
         "tsi-edge-status-probe" => cmd_tsi_edge_status_probe(),
-        "tsi1-baseline-signal-probe" => cmd_tsi1_baseline_signal_probe(false),
-        "tsi1-crossbar-probe" => cmd_tsi1_baseline_signal_probe(true),
+        "tsi1-baseline-signal-probe" => cmd_tsi1_baseline_signal_probe(),
         "isdbs-tmcc-tsids" => cmd_isdbs_tmcc_tsids(),
         "dmd-regs" => cmd_dmd_regs(),
         "dmd-hiz-probe" => cmd_dmd_hiz_probe(false),
@@ -2906,7 +2904,7 @@ fn cmd_tsi_edge_status_probe() -> i32 {
     restore
 }
 
-fn cmd_tsi1_baseline_signal_probe(crossbar: bool) -> i32 {
+fn cmd_tsi1_baseline_signal_probe() -> i32 {
     let result = (|| -> Result<(), String> {
         let status = gr_i2c::read_isdbs_status().map_err(|e| e.to_string())?;
         if status.lock != 0x67 || status.ts_pin != 0x01 || status.ts_serial != 0xc0 {
@@ -2927,9 +2925,6 @@ fn cmd_tsi1_baseline_signal_probe(crossbar: bool) -> i32 {
         if mmr()? != [0x0100_0000, 0x0100_0100, 0x0000_0200] {
             return Err("refuse: TSI MMR is not the measured startup baseline".to_owned());
         }
-        if drv.mmr_read32(0x61f0).map_err(|e| e.to_string())? != 0x10 {
-            return Err("refuse: TSI crossbar differs from startup baseline".to_owned());
-        }
         let (lock, crc) = drv.tsi_status(1).map_err(|e| e.to_string())?;
         println!("TSI1 before: lock={} crc={crc:02x}", u8::from(lock));
         let result = (|| -> Result<(), String> {
@@ -2940,15 +2935,6 @@ fn cmd_tsi1_baseline_signal_probe(crossbar: bool) -> i32 {
             if active != [0x0300_0000, 0x0100_0100, 0x0000_0200] {
                 return Err("TSI1 configuration readback differs from expected values".to_owned());
             }
-            if crossbar {
-                drv.set_tsi_crossbar_input1(0)
-                    .map_err(|e| format!("configure TSI1 crossbar: {e}"))?;
-                let active = drv.mmr_read32(0x61f0).map_err(|e| e.to_string())?;
-                println!("TSI crossbar active: {active:08x}");
-                if active != 0 {
-                    return Err("TSI1 crossbar readback differs from expected value".to_owned());
-                }
-            }
             for sample in 1..=8 {
                 std::thread::sleep(Duration::from_millis(250));
                 let (lock, crc) = drv.tsi_status(1).map_err(|e| e.to_string())?;
@@ -2956,20 +2942,8 @@ fn cmd_tsi1_baseline_signal_probe(crossbar: bool) -> i32 {
             }
             Ok(())
         })();
-        let crossbar_restore = if crossbar {
-            drv.set_tsi_crossbar_input1(1)
-                .map_err(|e| format!("restore TSI1 crossbar: {e}"))
-                .and_then(|()| drv.mmr_read32(0x61f0).map_err(|e| e.to_string()))
-        } else {
-            Ok(0x10)
-        };
         drv.configure_tsi1_baseline_signal(false)
             .map_err(|e| format!("restore TSI1: {e}"))?;
-        let crossbar_restored = crossbar_restore?;
-        println!("TSI crossbar restored: {crossbar_restored:08x}");
-        if crossbar_restored != 0x10 {
-            return Err("TSI1 crossbar restoration differs from startup baseline".to_owned());
-        }
         let restored = mmr()?;
         println!("TSI MMR restored: {restored:08x?}");
         if restored != [0x0100_0000, 0x0100_0100, 0x0000_0200] {

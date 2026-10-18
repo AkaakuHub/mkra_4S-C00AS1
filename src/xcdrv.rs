@@ -916,18 +916,6 @@ impl XcDrv {
         Ok(())
     }
 
-    pub fn set_tsi_crossbar_input1(&self, source: u32) -> io::Result<()> {
-        if source > 1 {
-            return Err(io::Error::new(io::ErrorKind::InvalidInput, "TSI source must be 0 or 1"));
-        }
-        let mut req = [0u32; 11];
-        req[0] = 1;
-        req[10] = source;
-        log_raw_words("TSI crossbar input1", &req);
-        unsafe { self.call(TSI_CONFIG_EX, &mut req)? };
-        Ok(())
-    }
-
     pub fn config_tsi_product_route(&self, device: u32, logical_port: u32) -> io::Result<()> {
         let mut req = product_tsi_request(device, logical_port);
         log_raw_words("DEMUX direct-route request", &req);
