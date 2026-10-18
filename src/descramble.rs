@@ -147,6 +147,7 @@ pub struct Decoder<C: Card> {
     seen_pmts: BTreeSet<u16>,
     routes: BTreeMap<u16, u16>,
     keys: BTreeMap<u16, Key>,
+    rejected: BTreeMap<u16, Vec<u8>>,
     fragment: Vec<u8>,
     waiting: VecDeque<[u8; 188]>,
     pat: bool,
@@ -171,6 +172,7 @@ impl<C: Card> Decoder<C> {
             seen_pmts: BTreeSet::new(),
             routes: BTreeMap::new(),
             keys: BTreeMap::new(),
+            rejected: BTreeMap::new(),
             fragment: Vec::new(),
             waiting: VecDeque::new(),
             pat: false,
@@ -276,7 +278,20 @@ impl<C: Card> Decoder<C> {
             if self.keys.get(&pid).is_some_and(|k| k.section == s) {
                 return Ok(());
             }
-            let controls = self.card.ecm(&s)?;
+            if self.rejected.get(&pid).is_some_and(|section| section == &s) {
+                return Ok(());
+            }
+            let controls = match self.card.ecm(&s) {
+                Ok(controls) => controls,
+                Err(error) if error.kind() == io::ErrorKind::PermissionDenied => {
+                    self.keys.remove(&pid);
+                    self.rejected.insert(pid, s);
+                    eprintln!("mkra: ECM PID {pid:#x}: {error}; preserving encrypted packets");
+                    return Ok(());
+                }
+                Err(error) => return Err(error),
+            };
+            self.rejected.remove(&pid);
             let work = [
                 multi2::schedule(&self.system, &controls[0]),
                 multi2::schedule(&self.system, &controls[1]),
@@ -323,10 +338,16 @@ impl<C: Card> Decoder<C> {
                 }
                 None => return Err(bad("scrambled PID has ambiguous/missing ECM routing")),
             };
-            let key = self
-                .keys
-                .get(&ecm)
-                .ok_or_else(|| bad("scrambled PID has no accepted ECM"))?;
+            let key = match self.keys.get(&ecm) {
+                Some(key) => key,
+                None if self.rejected.contains_key(&ecm) => {
+                    *self.encrypted_passthrough.entry(pid).or_default() += 1;
+                    out.extend_from_slice(&p);
+                    self.packets += 1;
+                    return Ok(());
+                }
+                None => return Err(bad("scrambled PID has no accepted ECM")),
+            };
             if let Some(offset) = payload(&p)? {
                 multi2::decrypt(
                     &mut p[offset..],
@@ -370,14 +391,16 @@ impl<C: Card> Decoder<C> {
                     && self.wanted_pmt.map_or(self.pmts == self.seen_pmts, |pid| {
                         self.seen_pmts.contains(&pid)
                     })
-                    && (self.routes.is_empty() || !self.keys.is_empty())
+                    && (self.routes.is_empty() || !self.keys.is_empty() || !self.rejected.is_empty())
                     && if self.scrambled_pids.is_empty() {
-                        self.routes.values().all(|pid| self.keys.contains_key(pid))
+                        self.routes.values().all(|pid| {
+                            self.keys.contains_key(pid) || self.rejected.contains_key(pid)
+                        })
                     } else {
                         self.scrambled_pids.iter().all(|&pid| {
                             self.ecm_for_pid(pid).map_or(
                                 self.wanted_service.is_some() && !self.routes.contains_key(&pid),
-                                |ecm| self.keys.contains_key(&ecm),
+                                |ecm| self.keys.contains_key(&ecm) || self.rejected.contains_key(&ecm),
                             )
                         })
                     }
