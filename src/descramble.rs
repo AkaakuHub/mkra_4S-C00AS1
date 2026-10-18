@@ -102,6 +102,12 @@ fn payload(p: &[u8]) -> io::Result<Option<usize>> {
         return Err(bad(&format!("TS sync invalid: header={:02X?}", &p[..4])));
     }
     let pid = (((p[1] & 31) as u16) << 8) | p[2] as u16;
+    if p[1] & 0x80 != 0 {
+        return Err(bad(&format!(
+            "TS transport error: PID={pid:#x} header={:02X?}",
+            &p[..4]
+        )));
+    }
     if p[3] & 0x30 == 0 {
         return Err(bad(&format!(
             "TS adaptation control invalid: PID={pid:#x} header={:02X?}",
@@ -375,21 +381,23 @@ impl<C: Card> Decoder<C> {
         for i in 0..count {
             let p: [u8; 188] = self.fragment[i * 188..(i + 1) * 188].try_into().unwrap();
             let pid = (((p[1] & 31) as u16) << 8) | p[2] as u16;
-            if p[0] == 0x47 && p[1] & 0x80 != 0 {
-                if let Some(assembler) = self.sections.get_mut(&pid) {
-                    *assembler = Sections::default();
+            let offset = match payload(&p) {
+                Ok(offset) => offset,
+                Err(error) if p[0] == 0x47 => {
+                    if let Some(assembler) = self.sections.get_mut(&pid) {
+                        *assembler = Sections::default();
+                    }
+                    self.transport_errors += 1;
+                    if self.transport_errors.is_power_of_two() {
+                        eprintln!(
+                            "mkra: discarded invalid TS packet: count={} {error}",
+                            self.transport_errors,
+                        );
+                    }
+                    continue;
                 }
-                self.transport_errors += 1;
-                if self.transport_errors.is_power_of_two() {
-                    eprintln!(
-                        "mkra: discarded TEI TS packet: count={} PID={pid:#x} header={:02X?}",
-                        self.transport_errors,
-                        &p[..4]
-                    );
-                }
-                continue;
-            }
-            let offset = payload(&p)?;
+                Err(error) => return Err(error),
+            };
             if p[3] >> 6 == 0 {
                 if let (Some(offset), Some(assembler)) = (offset, self.sections.get_mut(&pid)) {
                     let ss = assembler.push(&p, offset)?;
@@ -607,6 +615,35 @@ mod tests {
         assert_eq!(d.encrypted_passthrough.get(&0x210), Some(&1));
     }
     #[test]
+    fn invalid_transport_packets_do_not_stop_valid_packets() {
+        for header in [
+            [0x47, 0x81, 0x21, 0x12, 0],
+            [0x47, 0x01, 0x21, 0x02, 0],
+            [0x47, 0x01, 0x21, 0x32, 184],
+        ] {
+            let mut d = Decoder::new(Fake { calls: 0 }, [0; 32], [0; 8], 0x4010);
+            d.started = true;
+            d.sections.insert(
+                0x121,
+                Sections {
+                    bytes: vec![0x82, 0xf0],
+                    cc: Some(1),
+                },
+            );
+            let mut broken = [0xff; 188];
+            broken[..5].copy_from_slice(&header);
+            let mut valid = [0xff; 188];
+            valid[..4].copy_from_slice(&[0x47, 0x1f, 0xff, 0x10]);
+            let input = [broken.as_slice(), valid.as_slice()].concat();
+            let mut out = Vec::new();
+            d.push(&input, &mut out).unwrap();
+            assert_eq!(out, valid);
+            assert_eq!(d.transport_errors, 1);
+            assert!(d.sections[&0x121].bytes.is_empty());
+            assert_eq!(d.sections[&0x121].cc, None);
+        }
+    }
+    #[test]
     fn wrong_tsid_and_unknown_scrambled_pid_fail_closed() {
         let mut d = Decoder::new(Fake { calls: 0 }, [0; 32], [0; 8], 0x4011);
         let mut out = Vec::new();
@@ -620,6 +657,10 @@ mod tests {
         d.routes.insert(0x142, 0x122);
         let mut p = [0u8; 188];
         p[..4].copy_from_slice(&[0x47, 2, 0, 0x90]);
+        assert!(d.push(&p, &mut out).is_err());
+        assert!(out.is_empty());
+        let mut d = Decoder::new(Fake { calls: 0 }, [0; 32], [0; 8], 0x4010);
+        p[0] = 0x46;
         assert!(d.push(&p, &mut out).is_err());
         assert!(out.is_empty());
     }
