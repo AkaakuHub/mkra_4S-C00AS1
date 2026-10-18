@@ -486,13 +486,15 @@ impl SiDb {
             return;
         }
         if is_mh_eit(tid) {
-            if let Some(section) = crate::program_tables::convert_present_following(sec) {
+            if tid == TID_MH_EIT_PF && sec.len() >= 18 && sec[5] & 1 != 0
+                && sec[6] <= 1 && sec[7] <= 1
+            {
                 let sid = u16b(sec, 3);
                 let nid = u16b(sec, 10);
                 self.present_following.retain(|(network, service, _), old| {
-                    (*network, *service) != (nid, sid) || old[5] == section[5]
+                    (*network, *service) != (nid, sid) || old[5] == sec[5]
                 });
-                self.present_following.insert((nid, sid, sec[6]), section);
+                self.present_following.insert((nid, sid, sec[6]), sec.to_vec());
             }
             self.parse_mh_eit(sec);
         } else if tid == TID_MH_SDT_ACTUAL || tid == TID_MH_SDT_OTHER {
