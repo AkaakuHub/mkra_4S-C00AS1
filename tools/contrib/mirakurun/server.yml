@@ -1,0 +1,10 @@
+port: 40773
+disableIPv6: true
+disableEITParsing: true
+logLevel: 2
+maxLogHistory: 50
+jobMaxRunning: 1
+jobMaxStandby: 1
+allowIPv4CidrRanges:
+  - 127.0.0.0/8
+  - 192.168.1.0/24

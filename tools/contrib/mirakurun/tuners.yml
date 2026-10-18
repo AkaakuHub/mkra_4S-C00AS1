@@ -1,0 +1,4 @@
+- name: AS1-4K
+  types:
+    - BS4K
+  command: /usr/local/bin/mkra remux4k --out - --seconds 86400
