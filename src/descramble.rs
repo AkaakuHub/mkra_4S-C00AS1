@@ -145,6 +145,7 @@ pub struct Decoder<C: Card> {
     tsid: u16,
     wanted_service: Option<u16>,
     wanted_pmt: Option<u16>,
+    wanted_ecms: BTreeSet<u16>,
     sections: BTreeMap<u16, Sections>,
     pmts: BTreeSet<u16>,
     seen_pmts: BTreeSet<u16>,
@@ -170,6 +171,7 @@ impl<C: Card> Decoder<C> {
             tsid,
             wanted_service: None,
             wanted_pmt: None,
+            wanted_ecms: BTreeSet::new(),
             sections: BTreeMap::from([(0, Sections::default())]),
             pmts: BTreeSet::new(),
             seen_pmts: BTreeSet::new(),
@@ -254,6 +256,7 @@ impl<C: Card> Decoder<C> {
                 return Err(bad("PMT program descriptors truncated"));
             }
             let program_ca = ca(&s[12..12 + len])?;
+            let mut ecms = BTreeSet::new();
             let mut n = 12 + len;
             while n < end {
                 if n + 5 > end {
@@ -273,8 +276,12 @@ impl<C: Card> Decoder<C> {
                     }
                     self.routes.insert(es, ecm);
                     self.sections.entry(ecm).or_default();
+                    ecms.insert(ecm);
                 }
                 n += 5 + size;
+            }
+            if self.wanted_pmt == Some(pid) {
+                self.wanted_ecms = ecms;
             }
             self.seen_pmts.insert(pid);
         } else if self.routes.values().any(|&p| p == pid) && [0x82, 0x83].contains(&s[0]) {
@@ -398,8 +405,12 @@ impl<C: Card> Decoder<C> {
                     && self.wanted_pmt.map_or(self.pmts == self.seen_pmts, |pid| {
                         self.seen_pmts.contains(&pid)
                     })
-                    && (self.wanted_service.is_some()
-                        || (self.routes.is_empty()
+                    && if self.wanted_service.is_some() {
+                        self.wanted_ecms.iter().all(|pid| {
+                            self.keys.contains_key(pid) || self.rejected.contains_key(pid)
+                        })
+                    } else {
+                        (self.routes.is_empty()
                             || !self.keys.is_empty()
                             || !self.rejected.is_empty())
                             && if self.scrambled_pids.is_empty() {
@@ -413,7 +424,8 @@ impl<C: Card> Decoder<C> {
                                             || self.rejected.contains_key(&ecm)
                                     })
                                 })
-                            })
+                            }
+                    }
                 {
                     self.started = true;
                     while let Some(p) = self.waiting.pop_front() {
