@@ -6,6 +6,7 @@ use crate::{
 use std::{
     collections::{BTreeMap, BTreeSet, VecDeque},
     io,
+    time::Instant,
 };
 const STARTUP_PACKETS: usize = 22_000;
 fn bad(s: &str) -> io::Error {
@@ -179,6 +180,8 @@ pub struct Decoder<C: Card> {
     pub packets: u64,
     pub decrypted: u64,
     pub updates: u64,
+    pub ecm_time_us: u128,
+    pub ecm_max_us: u128,
     pub encrypted_passthrough: BTreeMap<u16, u64>,
 }
 impl<C: Card> Decoder<C> {
@@ -204,6 +207,8 @@ impl<C: Card> Decoder<C> {
             packets: 0,
             decrypted: 0,
             updates: 0,
+            ecm_time_us: 0,
+            ecm_max_us: 0,
             encrypted_passthrough: BTreeMap::new(),
         }
     }
@@ -290,7 +295,12 @@ impl<C: Card> Decoder<C> {
             if self.rejected.get(&pid).is_some_and(|section| section == &s) {
                 return Ok(());
             }
-            let controls = match self.card.ecm(&s) {
+            let started = Instant::now();
+            let result = self.card.ecm(&s);
+            let elapsed = started.elapsed().as_micros();
+            self.ecm_time_us += elapsed;
+            self.ecm_max_us = self.ecm_max_us.max(elapsed);
+            let controls = match result {
                 Ok(controls) => controls,
                 Err(error)
                     if error

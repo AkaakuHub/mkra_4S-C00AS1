@@ -68,6 +68,7 @@ pub struct Source {
     capture: Option<Capture>,
     decoder: Decoder<NativeCard>,
     last_data: Instant,
+    decode_max_us: u128,
     dirty: Arc<AtomicBool>,
     label: String,
 }
@@ -102,6 +103,7 @@ impl Source {
             capture: None,
             decoder: Decoder::new(card, system, iv, tsid).full_multiplex(),
             last_data: Instant::now(),
+            decode_max_us: 0,
             dirty,
             label: format!("ISDB-S RF {freq} TSID {tsid:04X} / native CAS + MULTI2"),
         };
@@ -165,7 +167,10 @@ impl TsSource for Source {
         let result = (|| {
             if !bytes.is_empty() {
                 self.last_data = Instant::now();
-                self.decoder.push(&bytes, out)?;
+                let started = Instant::now();
+                let decoded = self.decoder.push(&bytes, out);
+                self.decode_max_us = self.decode_max_us.max(started.elapsed().as_micros());
+                decoded?;
             } else if self.last_data.elapsed() > Duration::from_secs(8) {
                 return Err(err("BS2K input stopped for eight seconds"));
             }
@@ -262,8 +267,9 @@ impl Drop for Source {
             );
         }
         eprintln!(
-            "mkra: BS2K closed: {} TS packets / {} decrypted / {} ECM updates; cleanup_ok={good}",
-            self.decoder.packets, self.decoder.decrypted, self.decoder.updates
+            "mkra: BS2K closed: {} TS packets / {} decrypted / {} ECM updates; cleanup_ok={good} decode_max_us={} ecm_time_us={} ecm_max_us={}",
+            self.decoder.packets, self.decoder.decrypted, self.decoder.updates,
+            self.decode_max_us, self.decoder.ecm_time_us, self.decoder.ecm_max_us,
         );
         #[cfg(feature = "software-cas")]
         eprintln!(
