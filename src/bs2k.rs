@@ -170,6 +170,7 @@ impl TsSource for Source {
             }
             Ok(out.len() - before)
         })();
+        self.capture.as_ref().unwrap().recycle(bytes);
         result.map_err(|e| {
             io::Error::new(
                 io::ErrorKind::UnexpectedEof,

@@ -14,6 +14,7 @@ const QUEUE_BLOCKS: usize = 32;
 
 pub(super) struct Capture {
     blocks: Receiver<Vec<u8>>,
+    recycle: SyncSender<Vec<u8>>,
     stop: Arc<AtomicBool>,
     worker: Option<JoinHandle<io::Result<()>>>,
 }
@@ -21,16 +22,25 @@ pub(super) struct Capture {
 impl Capture {
     pub(super) fn start(reader: XcReaderSource) -> io::Result<Self> {
         let (sender, blocks) = sync_channel(QUEUE_BLOCKS);
+        let (recycle, free) = sync_channel(1);
         let stop = Arc::new(AtomicBool::new(false));
         let worker_stop = Arc::clone(&stop);
         let worker = thread::Builder::new()
             .name("bs2k-capture".into())
-            .spawn(move || run(reader, sender, &worker_stop))?;
+            .spawn(move || run(reader, sender, free, &worker_stop))?;
         Ok(Self {
             blocks,
+            recycle,
             stop,
             worker: Some(worker),
         })
+    }
+
+    pub(super) fn recycle(&self, mut block: Vec<u8>) {
+        if !block.is_empty() {
+            block.clear();
+            let _ = self.recycle.try_send(block);
+        }
     }
 
     pub(super) fn read(&mut self) -> io::Result<Vec<u8>> {
@@ -67,11 +77,15 @@ impl Drop for Capture {
 
 fn enqueue(
     sender: &SyncSender<Vec<u8>>,
+    free: &Receiver<Vec<u8>>,
     block: Vec<u8>,
     dropped_packets: &mut u64,
 ) -> Option<Vec<u8>> {
     match sender.try_send(block) {
-        Ok(()) => Some(Vec::with_capacity(BLOCK_BYTES)),
+        Ok(()) => Some(
+            free.try_recv()
+                .unwrap_or_else(|_| Vec::with_capacity(BLOCK_BYTES)),
+        ),
         Err(TrySendError::Full(mut block)) => {
             if *dropped_packets == 0 {
                 eprintln!("mkra: BS2K capture queue full; discarding whole TS packets to keep the hardware drained");
@@ -87,6 +101,7 @@ fn enqueue(
 fn run(
     mut reader: XcReaderSource,
     sender: SyncSender<Vec<u8>>,
+    free: Receiver<Vec<u8>>,
     stop: &AtomicBool,
 ) -> io::Result<()> {
     let mut scratch = Vec::new();
@@ -102,7 +117,7 @@ fn run(
                 let complete = block.len() / 188 * 188;
                 if complete > 0 {
                     let remainder = block.split_off(complete);
-                    let Some(next) = enqueue(&sender, block, &mut dropped_packets) else {
+                    let Some(next) = enqueue(&sender, &free, block, &mut dropped_packets) else {
                         return Ok(());
                     };
                     block = next;
@@ -121,7 +136,7 @@ fn run(
                 block.extend_from_slice(&bytes[..take]);
                 bytes = &bytes[take..];
                 if block.len() == BLOCK_BYTES {
-                    let Some(next) = enqueue(&sender, block, &mut dropped_packets) else {
+                    let Some(next) = enqueue(&sender, &free, block, &mut dropped_packets) else {
                         return Ok(());
                     };
                     block = next;
