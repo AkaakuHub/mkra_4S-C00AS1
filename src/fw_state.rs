@@ -100,3 +100,20 @@ pub fn print_queue() -> io::Result<()> {
     }
     Ok(())
 }
+
+pub fn print_p4_queue() -> io::Result<()> {
+    let mut kmem = Kmem::open()?;
+    let ctx = kmem.u32(ksym("gps_XCode")?)?;
+    if ctx < 0x8000_0000 || kmem.u32(ctx + 0x463b0)? != 100 {
+        return Err(io::Error::other("unexpected XCode6 queue layout"));
+    }
+    let base = ctx + 0x220 + 2 * 0x40;
+    let data = kmem.read(base, 0x20)?;
+    println!("XCode6 P4 host queue (read-only), base={base:#010x}:");
+    for (class, pair) in data.chunks_exact(8).enumerate() {
+        let head = u32::from_le_bytes(pair[..4].try_into().unwrap());
+        let tail = u32::from_le_bytes(pair[4..].try_into().unwrap());
+        println!("  class={class} head={head:#010x} tail={tail:#010x}");
+    }
+    Ok(())
+}
