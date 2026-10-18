@@ -2840,12 +2840,25 @@ fn cmd_tsi_edge_status_probe() -> i32 {
         let drv = XcDrv::open_path(xcdrv::DEV_PATH).map_err(|e| e.to_string())?;
         fw_state::ensure_p4_idle(&drv).map_err(|e| format!("refuse TSI edge probe: {e}"))?;
         let before = drv.mmr_read32(0x6008).map_err(|e| e.to_string())?;
-        if before != 0x0300_0300 {
-            return Err(format!("refuse: TSI edge MMR is 0x{before:08x}, expected 0x03000300"));
+        if before != 0x0100_0100 && before != 0x0300_0300 {
+            return Err(format!("refuse: TSI edge MMR is 0x{before:08x}, expected 0x01000100 or 0x03000300"));
         }
         let (lock, crc) = drv.tsi_status(1).map_err(|e| e.to_string())?;
         println!("TSI1 before: lock={} crc={crc:02x}", u8::from(lock));
         modified = true;
+        if before == 0x0100_0100 {
+            drv.configure_product_mpeg_ts_tsi(1)
+                .map_err(|e| format!("configure product TSI1: {e}"))?;
+            let active = drv.mmr_read32(0x6008).map_err(|e| e.to_string())?;
+            if active != 0x0300_0300 {
+                return Err(format!("product TSI1 readback 0x{active:08x}"));
+            }
+            for sample in 1..=4 {
+                std::thread::sleep(Duration::from_millis(250));
+                let (lock, crc) = drv.tsi_status(1).map_err(|e| e.to_string())?;
+                println!("TSI1 product-edge sample {sample}: lock={} crc={crc:02x}", u8::from(lock));
+            }
+        }
         drv.configure_physical_tsi_edge(1, xcdrv::ME_PACKET_188, false, false, false)
             .map_err(|e| format!("configure positive-edge TSI1: {e}"))?;
         let active = drv.mmr_read32(0x6008).map_err(|e| e.to_string())?;
