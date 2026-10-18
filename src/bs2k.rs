@@ -1,4 +1,7 @@
 //! Owned live ISDB-S graph. The shared Broker serializes this with BS4K.
+mod capture;
+
+use capture::Capture;
 use crate::{
     cas::NativeCard,
     descramble::Decoder,
@@ -62,9 +65,8 @@ pub struct Source {
     connection: u32,
     filter: bool,
     running: bool,
-    reader: Option<XcReaderSource>,
+    capture: Option<Capture>,
     decoder: Decoder<NativeCard>,
-    scratch: Vec<u8>,
     last_data: Instant,
     dirty: Arc<AtomicBool>,
     label: String,
@@ -97,9 +99,8 @@ impl Source {
             connection: 0,
             filter: false,
             running: false,
-            reader: None,
+            capture: None,
             decoder: Decoder::new(card, system, iv, tsid).full_multiplex(),
-            scratch: Vec::new(),
             last_data: Instant::now(),
             dirty,
             label: format!("ISDB-S RF {freq} TSID {tsid:04X} / native CAS + MULTI2"),
@@ -141,11 +142,11 @@ impl Source {
         source.running = true;
         source.buffer = source.drv.create_demux_ts_buffer()?;
         source.connection = source.drv.connect_output(source.device, source.buffer)?;
-        source.reader = Some(XcReaderSource::attach(
+        source.capture = Some(Capture::start(XcReaderSource::attach(
             Arc::clone(&source.drv),
             source.buffer,
             200,
-        )?);
+        )?)?);
         source
             .drv
             .add_demux_pid(source.device, u32::MAX, source.connection)?;
@@ -159,12 +160,11 @@ impl Source {
 impl TsSource for Source {
     fn read_into(&mut self, out: &mut Vec<u8>) -> io::Result<usize> {
         let before = out.len();
-        self.scratch.clear();
+        let bytes = self.capture.as_mut().unwrap().read()?;
         let result = (|| {
-            self.reader.as_mut().unwrap().read_into(&mut self.scratch)?;
-            if !self.scratch.is_empty() {
+            if !bytes.is_empty() {
                 self.last_data = Instant::now();
-                self.decoder.push(&self.scratch, out)?;
+                self.decoder.push(&bytes, out)?;
             } else if self.last_data.elapsed() > Duration::from_secs(8) {
                 return Err(err("BS2K input stopped for eight seconds"));
             }
@@ -196,7 +196,7 @@ impl Drop for Source {
                 self.drv.remove_demux_pid(self.device, u32::MAX),
             );
         }
-        drop(self.reader.take());
+        drop(self.capture.take());
         if self.connection != 0 {
             if let Err(first) = self
                 .drv
