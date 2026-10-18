@@ -769,7 +769,7 @@ fn cmd_isdbs_ts_exclusive() -> i32 {
     match gr_i2c::make_isdbs_ts_output_exclusive() {
         Ok(result) => {
             println!(
-                "SC1501A page 0x10 reg 0xcc: {:#04x} -> {:#04x}; stale TLV bit6 cleared, TS bit7 retained",
+                "SC1501A page 0x10 reg 0xcc: {:#04x} -> {:#04x}; TS output selected, TLV output disabled",
                 result.before, result.after
             );
             0
