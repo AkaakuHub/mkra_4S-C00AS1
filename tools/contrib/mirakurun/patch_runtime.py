@@ -27,6 +27,16 @@ def main(root: Path) -> None:
         '            case "BS":\n                order = "2";',
         '            case "BS":\n            case "BS4K":\n                order = "2";',
     )
+    replace_once(
+        base / "Service.js",
+        'if (this.findByChannel(channel).length > 0) {',
+        'if (channel.type === "BS4K" || this.findByChannel(channel).length > 0) {',
+    )
+    replace_once(
+        base / "TunerDevice.js",
+        '            this._end();\n            setTimeout(this._release.bind(this), this._config.dvbDevicePath ? 1000 : 100);\n        });\n        this._process.stderr',
+        '            if (code !== 0) this._closing = true;\n            this._end();\n            setTimeout(this._release.bind(this), this._config.dvbDevicePath ? 1000 : 100);\n        });\n        this._process.stderr',
+    )
 
 
 if __name__ == "__main__":

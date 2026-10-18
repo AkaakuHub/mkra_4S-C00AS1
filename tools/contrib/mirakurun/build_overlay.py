@@ -33,7 +33,7 @@ def main(archives: Path, mkra: Path, output: Path, work: Path) -> None:
     with TemporaryDirectory(dir=work) as stage_name:
         stage = Path(stage_name)
         with tarfile.open(archives / "mirakurun-runtime.tar.gz", "r:gz") as runtime:
-            for name in ("Channel.js", "common.js", "ServiceItem.js"):
+            for name in ("Channel.js", "common.js", "ServiceItem.js", "Service.js", "TunerDevice.js"):
                 relative = f"{RUNTIME_DIR}/{name}"
                 target = stage / relative
                 target.parent.mkdir(parents=True, exist_ok=True)
@@ -53,7 +53,7 @@ def main(archives: Path, mkra: Path, output: Path, work: Path) -> None:
                     if member.name.startswith("usr/lib/arm-linux-gnueabihf/libatomic.so"):
                         overlay.addfile(member, atomic.extractfile(member) if member.isfile() else None)
 
-            for name in ("Channel.js", "common.js", "ServiceItem.js"):
+            for name in ("Channel.js", "common.js", "ServiceItem.js", "Service.js", "TunerDevice.js"):
                 relative = f"{RUNTIME_DIR}/{name}"
                 overlay.add(stage / relative, arcname=relative)
             for name in ("server.yml", "tuners.yml", "channels.yml"):
