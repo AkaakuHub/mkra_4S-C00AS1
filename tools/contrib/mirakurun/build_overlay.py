@@ -58,7 +58,11 @@ def main(archives: Path, mkra: Path, output: Path, work: Path) -> None:
                 overlay.add(stage / relative, arcname=relative)
             for name in ("server.yml", "tuners.yml", "channels.yml"):
                 overlay.add(Path(__file__).parent / name, arcname=f"usr/local/etc/mirakurun/{name}")
-            overlay.add(mkra, arcname="usr/local/bin/mkra")
+            def executable(info: tarfile.TarInfo) -> tarfile.TarInfo:
+                info.mode = 0o755
+                return info
+
+            overlay.add(mkra, arcname="usr/local/bin/mkra", filter=executable)
 
 
 if __name__ == "__main__":
