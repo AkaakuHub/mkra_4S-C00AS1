@@ -707,6 +707,10 @@ fn stream(state: &AppState, req: &Request, out: &mut TcpStream, channel_key: &st
         if n > 0 {
             break n;
         }
+        if sys::socket_disconnected(out).unwrap_or(true) {
+            state.broker.unsubscribe(&session, &sub);
+            return;
+        }
         if sub.is_closed() || Instant::now() >= deadline {
             eprintln!(
                 "mkra: no data from the TS backend for {channel_key} within {:?}; \
@@ -738,7 +742,10 @@ fn stream(state: &AppState, req: &Request, out: &mut TcpStream, channel_key: &st
     loop {
         let n = sub.read(&mut buf, Duration::from_millis(500));
         if n == 0 {
-            if sub.is_closed() || idle_since.elapsed() >= STALL_TIMEOUT {
+            if sys::socket_disconnected(out).unwrap_or(true)
+                || sub.is_closed()
+                || idle_since.elapsed() >= STALL_TIMEOUT
+            {
                 break;
             }
             continue;

@@ -8,6 +8,8 @@
 
 use std::ffi::c_void;
 use std::io;
+use std::net::TcpStream;
+use std::os::fd::AsRawFd;
 
 pub type c_int = i32;
 /// `long` on the device's 32-bit ARM ABI. Used for the System V `mtype` field,
@@ -22,6 +24,8 @@ extern "C" {
     /// binary is ever built dynamically.
     pub fn ioctl(fd: c_int, request: c_int, ...) -> c_int;
 
+    fn recv(fd: c_int, buf: *mut c_void, len: size_t, flags: c_int) -> isize;
+
     /// Only the send half is declared. Replies from the tuner daemon go to a
     /// product-internal queue we have no way to claim, so mkra never receives
     /// (DESIGN.md §6.2).
@@ -29,6 +33,28 @@ extern "C" {
 }
 
 pub const IPC_NOWAIT: c_int = 0o4000;
+
+pub fn socket_disconnected(stream: &TcpStream) -> io::Result<bool> {
+    const MSG_PEEK: c_int = 0x02;
+    const MSG_DONTWAIT: c_int = 0x40;
+    let mut byte = 0u8;
+    let result = unsafe {
+        recv(
+            stream.as_raw_fd(),
+            (&mut byte as *mut u8).cast(),
+            1,
+            MSG_PEEK | MSG_DONTWAIT,
+        )
+    };
+    if result >= 0 {
+        return Ok(result == 0);
+    }
+    let error = io::Error::last_os_error();
+    match error.kind() {
+        io::ErrorKind::WouldBlock | io::ErrorKind::Interrupted => Ok(false),
+        _ => Err(error),
+    }
+}
 
 /// `ioctl(fd, request, arg)` returning the raw result, or the OS error.
 ///
