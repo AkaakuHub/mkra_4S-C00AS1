@@ -108,6 +108,37 @@ impl<'a> Iterator for Sections<'a> {
     }
 }
 
+pub fn ring_sections(buf: &[u8]) -> impl Iterator<Item = &[u8]> {
+    let mut off = 0usize;
+    std::iter::from_fn(move || {
+        while off + 8 <= buf.len() {
+            let tid = buf[off];
+            // Only long-form tables are self-checking, and they are the ones
+            // carrying everything we want (EIT/SDT/NIT/TOT/AMT).
+            if tid == 0 || !is_long_form(tid) {
+                off += 1;
+                continue;
+            }
+            let Some(total) = section_total_len(buf, off) else {
+                off += 1;
+                continue;
+            };
+            if total <= 8 || off + total > buf.len() {
+                off += 1;
+                continue;
+            }
+            let sec = &buf[off..off + total];
+            if crc32_mpeg(sec) != 0 {
+                off += 1;
+                continue;
+            }
+            off += total;
+            return Some(sec);
+        }
+        None
+    })
+}
+
 // --- byte helpers ---------------------------------------------------------
 
 fn u16b(b: &[u8], i: usize) -> u16 {
@@ -762,52 +793,6 @@ impl SiDb {
         }
     }
 
-    /// Feed bytes read straight off a hardware section ring.
-    ///
-    /// This is the source that actually works in practice. The product only
-    /// rewrites `/tmp/adsb/Adsb*.dat` while it is presenting a service — on a
-    /// box with no display attached those files can stay empty for the whole
-    /// session — but the section filters run whenever the frontend is locked,
-    /// so the rings carry SI even in standby.
-    ///
-    /// Ring records are framed (`flags | flags | 00 | u16be length | section`),
-    /// but we deliberately do not trust that framing: a passive tap starts at an
-    /// arbitrary offset and can be overtaken mid-record. Instead we scan for a
-    /// byte that begins a section whose CRC-32 comes out zero, which is
-    /// self-validating and needs no framing assumption at all.
-    ///
-    /// Returns how many sections were accepted.
-    pub fn ingest_ring(&mut self, buf: &[u8]) -> usize {
-        let mut off = 0usize;
-        let mut n = 0usize;
-        while off + 8 <= buf.len() {
-            let tid = buf[off];
-            // Only long-form tables are self-checking, and they are the ones
-            // carrying everything we want (EIT/SDT/NIT/TOT/AMT).
-            if tid == 0 || !is_long_form(tid) {
-                off += 1;
-                continue;
-            }
-            let Some(total) = section_total_len(buf, off) else {
-                off += 1;
-                continue;
-            };
-            if total <= 8 || off + total > buf.len() {
-                off += 1;
-                continue;
-            }
-            let sec = &buf[off..off + total];
-            if crc32_mpeg(sec) != 0 {
-                off += 1;
-                continue;
-            }
-            self.ingest_section(sec);
-            n += 1;
-            off += total;
-        }
-        n
-    }
-
     /// Programs for one service, ordered by start time.
     pub fn programs_of(&self, network_id: u16, service_id: u16) -> Vec<&Program> {
         let mut v: Vec<&Program> = self
@@ -974,7 +959,7 @@ mod tests {
     #[test]
     fn a_raw_ring_tap_resynchronises_and_yields_programs() {
         let mut db = SiDb::new();
-        let n = db.ingest_ring(RING_TAP);
+        let n = ring_sections(RING_TAP).inspect(|section| db.ingest_section(section)).count();
         assert!(n >= 8, "only {n} sections recovered from the ring tap");
         assert!(!db.programs.is_empty());
         assert!(db.programs.values().any(|p| !p.name.is_empty()));
@@ -985,7 +970,7 @@ mod tests {
         // A passive tap has no idea where a record begins. Chop the fixture at
         // a deliberately awkward point and check we still resynchronise.
         let mut db = SiDb::new();
-        let n = db.ingest_ring(&RING_TAP[37..]);
+        let n = ring_sections(&RING_TAP[37..]).inspect(|section| db.ingest_section(section)).count();
         assert!(n >= 6, "resync failed: only {n} sections");
         assert!(!db.programs.is_empty());
     }
@@ -999,9 +984,7 @@ mod tests {
             x = x.wrapping_mul(1_103_515_245).wrapping_add(12_345);
             *b = (x >> 16) as u8;
         }
-        let mut db = SiDb::new();
-        assert_eq!(db.ingest_ring(&noise), 0);
-        assert!(db.programs.is_empty());
+        assert_eq!(ring_sections(&noise).count(), 0);
     }
 
     #[test]
