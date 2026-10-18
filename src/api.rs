@@ -138,14 +138,17 @@ impl AppState {
     ///
     /// Returns (sections accepted this pass, total programs known).
     pub fn merge_ring_si(&self, chunks: &[Vec<u8>]) -> (usize, usize) {
+        let sections: Vec<_> = chunks
+            .iter()
+            .flat_map(|chunk| crate::si::ring_sections(chunk))
+            .collect();
         let Ok(mut db) = self.epg.write() else {
             return (0, 0);
         };
-        let mut accepted = 0;
-        for c in chunks {
-            accepted += db.ingest_ring(c);
+        for section in &sections {
+            db.ingest_section(section);
         }
-        (accepted, db.programs.len())
+        (sections.len(), db.programs.len())
     }
 }
 
