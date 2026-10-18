@@ -149,7 +149,7 @@ impl Graph {
             let ptr = k.u32(ctx + poff)?;
             let mut rows = Vec::new();
             if ptr >= 0x8000_0000 && count as usize <= cap {
-                let n = cap.min(count as usize + 8);
+                let n = cap;
                 let raw = k.read(ptr, n * stride)?;
                 for i in 0..n {
                     let base = i * stride;

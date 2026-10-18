@@ -1563,19 +1563,21 @@ fn cmd_serve(opts: &Options) -> i32 {
             Ok(n) => eprintln!("mkra: EPG loaded from {dir}: {n} programs"),
             Err(e) => eprintln!("mkra: EPG not available yet from {dir}: {e}"),
         }
-        let refresher = Arc::clone(&state);
-        let every = Duration::from_secs(opts.epg_refresh_secs.max(30));
-        std::thread::Builder::new()
-            .name("epg".into())
-            .stack_size(64 * 1024)
-            .spawn(move || loop {
-                std::thread::sleep(every);
-                match refresher.reload_epg(&dir) {
-                    Ok(n) => eprintln!("mkra: EPG refreshed: {n} programs"),
-                    Err(e) => eprintln!("mkra: EPG refresh failed: {e}"),
-                }
-            })
-            .ok();
+        if !opts.epg_tap {
+            let refresher = Arc::clone(&state);
+            let every = Duration::from_secs(opts.epg_refresh_secs.max(30));
+            std::thread::Builder::new()
+                .name("epg".into())
+                .stack_size(64 * 1024)
+                .spawn(move || loop {
+                    std::thread::sleep(every);
+                    match refresher.reload_epg(&dir) {
+                        Ok(n) => eprintln!("mkra: EPG refreshed: {n} programs"),
+                        Err(e) => eprintln!("mkra: EPG refresh failed: {e}"),
+                    }
+                })
+                .ok();
+        }
     }
 
     // Live EPG: read the hardware section rings directly.
