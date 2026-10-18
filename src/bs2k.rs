@@ -129,6 +129,7 @@ impl Source {
             }
             std::thread::sleep(Duration::from_millis(150));
         }
+        gr_i2c::make_isdbs_ts_output_exclusive()?;
         source.pipeline = source.drv.create_pipeline()?;
         source.av = source.drv.create_av_sync()?;
         source.drv.set_pipeline(source.av, source.pipeline)?;

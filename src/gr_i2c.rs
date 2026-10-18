@@ -857,7 +857,7 @@ mod arm_linux {
             let lock = bus.read(0x12, 0x5e, 1)?[0];
             let ts_pin = bus.read(0x10, 0x0b, 1)?[0];
             let before = bus.read(0x10, 0xcc, 1)?[0];
-            if lock & 0x20 == 0 || ts_pin != 0x01 || before != 0xc0 {
+            if lock & 0x20 == 0 || ts_pin != 0x01 || !matches!(before, 0x80 | 0xc0) {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidData,
                     format!(
@@ -869,7 +869,9 @@ mod arm_linux {
             // Exact equivalent of vendor maskwrite(reg=0xcc, mask=0x40,
             // value=0), with the already-compared old byte held under the
             // same bus semaphore. Bit 7 and every unrelated bit are retained.
-            bus.write(0x10, 0xcc, &[before & !0x40])?;
+            if before != 0x80 {
+                bus.write(0x10, 0xcc, &[before & !0x40])?;
+            }
             let after = bus.read(0x10, 0xcc, 1)?[0];
             if after != 0x80 {
                 return Err(io::Error::other(format!(
