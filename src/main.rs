@@ -77,7 +77,7 @@ USAGE:
   mkra fed-off --path <1..4> --dev <0x2|0x4|0x8> [--dry-run]
   mkra fem-dev --path <1..6> (--dev <hex> | --disconnect) [--dry-run]
   mkra cpld --reg <0..4> [--set <hex> --expect <hex>]
-  mkra tsrec --out <path> [--seconds <n>] [--tsi-port <n>]
+  mkra tsrec --out <path> [--seconds <n>] [--tsi-port <n>] [--tsi-preserve-config]
   mkra demux --out <path> [--seconds <n>] [--tsi-port <n>] [--tsi-logical-port <0|1>] [--tsi-explicit-route] [--tsi-crossbar-source <1>] [--tsi-packet <188|192|204|130>] [--tsi-use-sync] [--tsi-parallel] [--tsi-positive-edge] [--tsi-preserve-config]
              [--pid <0..8191>|--pat-section] [--run-after-filter] [--dry-run]
   mkra remux4k --out <path> [--seconds <n>] [--tsid <hex>] [--dry-run]
@@ -2325,6 +2325,10 @@ fn cmd_tsrec(opts: &Options) -> i32 {
         eprintln!("mkra: --tsi-port must be 0..7");
         return 2;
     }
+    if opts.tsi_preserve_config && (opts.tsi_port != 0 || !(1..=8).contains(&opts.seconds)) {
+        eprintln!("mkra: tsrec --tsi-preserve-config requires TSI0 and --seconds 1..8");
+        return 2;
+    }
     // The vendor only instantiates the TS input while the box is operating;
     // keep the same explicit gate used by the read-only probe commands so a
     // standby run cannot be mistaken for a negative TS_RECODER result.
@@ -2343,6 +2347,12 @@ fn cmd_tsrec(opts: &Options) -> i32 {
             return 1;
         }
     };
+    if opts.tsi_preserve_config {
+        if let Err(e) = fw_state::ensure_p4_idle(&drv).and_then(|_| ensure_2k_tsi0_state(&drv)) {
+            eprintln!("mkra: refuse preserve-config TS_RECODER probe: {e}");
+            return 1;
+        }
+    }
 
     let (mut device, mut buffer, mut connection, mut reader) = (0u32, 0u32, 0u32, 0u32);
     let mut running = false;
@@ -2351,9 +2361,13 @@ fn cmd_tsrec(opts: &Options) -> i32 {
         // `detect_stream` creates TS_RECODER.  Use serial mode (the SDK CLI
         // default) and that class's explicit flags; the product DEMUX differs
         // in its use_sync_signal bit.
-        drv.configure_ts_recorder_physical_tsi(opts.tsi_port)
-            .map_err(|e| format!("configure physical TSI{}: {e}", opts.tsi_port))?;
-        println!("tsrec: physical TSI{} configured for SDK TS_RECODER", opts.tsi_port);
+        if opts.tsi_preserve_config {
+            println!("tsrec: preserving physical TSI{} configuration", opts.tsi_port);
+        } else {
+            drv.configure_ts_recorder_physical_tsi(opts.tsi_port)
+                .map_err(|e| format!("configure physical TSI{}: {e}", opts.tsi_port))?;
+            println!("tsrec: physical TSI{} configured for SDK TS_RECODER", opts.tsi_port);
+        }
         device = drv.create_ts_recorder().map_err(|e| format!("create TS_RECODER: {e}"))?;
         println!("tsrec: device {device:#x}");
         buffer = drv
@@ -2925,6 +2939,19 @@ fn cmd_demux(opts: &Options) -> i32 {
     capture
 }
 
+fn ensure_2k_tsi0_state(drv: &XcDrv) -> io::Result<()> {
+    let status = gr_i2c::read_isdbs_status()?;
+    if status.lock != 0x67 || status.ts_pin != 1 || status.ts_serial != 0xc0
+        || drv.mmr_read32(0x6000)? != 0x0300_0000
+        || drv.mmr_read32(0x6008)? != 0x0300_0300
+        || drv.mmr_read32(0x600c)? != 0
+        || !drv.tsi_status(0)?.0
+    {
+        return Err(io::Error::other("unexpected 2K demodulator or TSI0 state"));
+    }
+    Ok(())
+}
+
 fn cmd_demux_core(opts: &Options) -> i32 {
     if opts.tsi_port > 7 {
         eprintln!("mkra: --tsi-port must be 0..7");
@@ -3076,19 +3103,7 @@ fn cmd_demux_core(opts: &Options) -> i32 {
         return 1;
     }
     if opts.tsi_preserve_config {
-        let state = (|| -> io::Result<()> {
-            let status = gr_i2c::read_isdbs_status()?;
-            if status.lock != 0x67 || status.ts_pin != 1 || status.ts_serial != 0xc0
-                || drv.mmr_read32(0x6000)? != 0x0300_0000
-                || drv.mmr_read32(0x6008)? != 0x0300_0300
-                || drv.mmr_read32(0x600c)? != 0
-                || !drv.tsi_status(0)?.0
-            {
-                return Err(io::Error::other("unexpected 2K demodulator or TSI0 state"));
-            }
-            Ok(())
-        })();
-        if let Err(e) = state {
+        if let Err(e) = ensure_2k_tsi0_state(&drv) {
             eprintln!("mkra: refuse preserve-config DEMUX probe: {e}");
             return 1;
         }
