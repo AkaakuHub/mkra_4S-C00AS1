@@ -263,6 +263,11 @@ impl Drop for Source {
             "mkra: BS2K closed: {} TS packets / {} decrypted / {} ECM updates; cleanup_ok={good}",
             self.decoder.packets, self.decoder.decrypted, self.decoder.updates
         );
+        #[cfg(feature = "software-cas")]
+        eprintln!(
+            "mkra: software ECM updates accepted by this process: {}",
+            crate::software_cas::accepted_updates()
+        );
     }
 }
 /// Restore native frontend initialization. Actual 4K service tune follows in factory.

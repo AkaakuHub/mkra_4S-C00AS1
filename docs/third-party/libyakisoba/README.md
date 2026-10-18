@@ -1,0 +1,21 @@
+# libyakisobaを使う任意ビルド
+
+`software-cas`featureは[tsunoda14/libyakisoba](https://github.com/tsunoda14/libyakisoba)のコミット`03849e66ecb8e89fcdd0862eebcf43255d63794a`を静的リンクするための接続処理です。libyakisobaはGPLv3で提供されています。ライセンス本文は同じディレクトリの`COPYING`に収録しています。
+
+通常のmkraビルドはこのライブラリを含みません。元のMITの著作権表示を維持します。libyakisobaを静的結合した実行ファイルを配布する場合は、その結合物にGPLv3のライセンス条件が適用されます。対応するソースの提供を含め、同梱のGPLv3に従う必要があります。このリポジトリには結合済み実行ファイルや鍵設定を収録しません。
+
+ARMv7 hard-floatのmusl向けにビルドした`libyakisoba.a`を用意し、そのディレクトリを`YAKISOBA_LIB_DIR`へ指定します。
+
+```sh
+YAKISOBA_LIB_DIR=/path/to/armv7-musl/lib sh build-device.sh --features software-cas --locked
+```
+
+libyakisobaの既存コードに合わせて`-fno-strict-aliasing`を指定します。mkra起動前の環境変数`BCAS_KEYS_FILE`でAS1内のユーザー管理ファイルを指定します。libyakisobaは起動時constructorで読み込むため、起動後に環境変数を設定しても反映されません。鍵設定の内容をログやGitへ出力しません。
+
+この接続処理は、通常BS・CSのECMをnative ACASが`A103`で拒否した場合だけ呼び出します。native ACASが受理したECM、他の拒否コード、通信失敗の処理は維持します。libyakisobaの戻り値が0の場合だけ受理し、鍵不足やMAC不一致などはECM単位の拒否として扱います。MULTI2とTS処理は既存実装を使い、親PCへ処理を移しません。
+
+終了時には、当該mkraプロセスがソフト処理で受理したECM更新回数だけを累積表示します。鍵・ECM本文・制御語・それらのハッシュは表示しません。
+
+`BCAS_KEYS_FILE`の更新も、既存の局表監視と同じ待機処理で適用します。更新元はRAM上の別名ファイルを完成させ、同じディレクトリ内のrenameで置き換えてください。監視にはinode・サイズ・変更時刻だけを使い、内容や鍵のハッシュを表示しません。配信と解放処理が終わり、解放失敗がない場合だけ再execしてconstructorへ読み込ませます。局表が不正な場合や、設定ファイルの状態を確認できない場合は再execしません。
+
+最初の起動では、constructorと監視開始の間に更新された可能性を排除するため、最初の待機時に一度再execします。再exec直前のファイル識別情報を内部環境変数へ引き継ぎ、次の起動後と照合します。その間にrenameされていれば次の待機時に再適用します。鍵の値をC側から取得して照合する処理はありません。
