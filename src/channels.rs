@@ -130,12 +130,12 @@ impl ChannelTable {
         self.channels.push(Channel {key:"BS_TS4010".into(),name:"BS-1 TSID4010 (BS朝日)".into(),slot:1,freq_khz:11_727_480,tsid:0x4010,ch_type:"BS".into(),services:[151,152,153].into_iter().map(|sid|Service {service_id:sid,network_id:4,name:format!("BS朝日{}",sid-150),service_type:1}).collect()});
     }
     /// Explicit ordinary BS/CS transport list; no unmeasured broadcast plan is invented.
-    /// Columns: type, network_id, service_id, transport_stream_id(hex), freq_khz, name.
+    /// Columns: type, channel, network_id, service_id, transport_stream_id(hex), freq_khz, name.
     pub fn add_isdbs_tsv(&mut self,text:&str)->Result<(),String> {
         let mut lines=text.lines().filter(|l|!l.trim().is_empty());
         let header:Vec<_>=lines.next().ok_or("empty ISDB-S table")?.split('\t').collect();
         let column=|key:&str|header.iter().position(|&s|s==key).ok_or_else(||format!("missing ISDB-S column {key}"));
-        let (kind,network,sid,tsid,freq,name)=(column("type")?,column("network_id")?,column("service_id")?,column("transport_stream_id")?,column("freq_khz")?,column("name")?);
+        let (kind,key,network,sid,tsid,freq,name)=(column("type")?,column("channel")?,column("network_id")?,column("service_id")?,column("transport_stream_id")?,column("freq_khz")?,column("name")?);
         let mut added=0;
         for line in lines {
             let f:Vec<_>=line.split('\t').collect();if f.len()!=header.len() {return Err("ISDB-S row length differs".into())}
@@ -146,10 +146,11 @@ impl ChannelTable {
             let freq:u32=f[freq].parse().map_err(|_|"bad RF kHz")?;
             if sid==0 || tsid==0xffff || crate::tuner::rf_to_bcd10(freq).is_none() {return Err("ISDB-S tune parameters out of range".into())}
             if self.find_service(network as u64*100_000+sid as u64).is_some() {return Err("duplicate ISDB-S service".into())}
-            let key=format!("{typ}_TS{tsid:04X}");
+            let key=f[key].to_string();
+            if key.is_empty() || !key.bytes().all(|b|b.is_ascii_alphanumeric() || b==b'_') {return Err("invalid ISDB-S channel key".into())}
             let service=Service {service_id:sid,network_id:network,name:f[name].into(),service_type:1};
             if let Some(c)=self.channels.iter_mut().find(|c|c.key==key) {
-                if c.freq_khz!=freq || c.ch_type!=typ {return Err("conflicting ISDB-S transport".into())}
+                if c.freq_khz!=freq || c.tsid!=tsid || c.ch_type!=typ {return Err("conflicting ISDB-S transport".into())}
                 c.services.push(service);
             }else {self.channels.push(Channel {key,name:format!("{typ} TSID {tsid:04X}"),slot:0,freq_khz:freq,tsid,services:vec![service],ch_type:typ.into()});}
             added+=1;
@@ -439,8 +440,8 @@ mod unified_tests {
         assert_eq!(t.find_service(400151).unwrap().0.key,"BS_TS4010");
         assert_eq!(t.find_service(1100151).unwrap().0.key,"BS7_0");
         assert!(t.find("BS4K","BS_TS4010").is_none());
-        let cs="type\tnetwork_id\tservice_id\ttransport_stream_id\tfreq_khz\tname\nCS\t6\t100\t6020\t12291000\tConfigured only\n";
-        t.add_isdbs_tsv(cs).unwrap();assert!(t.find("CS","CS_TS6020").unwrap().is_bs2k());
+        let cs="type\tchannel\tnetwork_id\tservice_id\ttransport_stream_id\tfreq_khz\tname\nCS\tND02\t6\t100\t6020\t12291000\tConfigured only\n";
+        t.add_isdbs_tsv(cs).unwrap();assert!(t.find("CS","ND02").unwrap().is_bs2k());
         assert!(t.add_isdbs_tsv(cs).is_err());
         assert!(t.add_isdbs_tsv(&cs.replace("12291000","1")).is_err());
     }
