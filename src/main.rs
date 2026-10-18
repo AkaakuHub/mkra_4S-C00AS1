@@ -78,7 +78,7 @@ USAGE:
   mkra fem-dev --path <1..6> (--dev <hex> | --disconnect) [--dry-run]
   mkra cpld --reg <0..4> [--set <hex> --expect <hex>]
   mkra tsrec --out <path> [--seconds <n>] [--tsi-port <n>] [--tsi-preserve-config]
-  mkra demux --out <path> [--seconds <n>] [--tsi-port <n>] [--tsi-logical-port <0|1>] [--tsi-explicit-route] [--tsi-crossbar-source <1>] [--tsi-packet <188|192|204|130>] [--tsi-use-sync] [--tsi-parallel] [--tsi-positive-edge] [--tsi-preserve-config]
+  mkra demux --out <path|-> [--seconds <n>] [--tsi-port <n>] [--tsi-logical-port <0|1>] [--tsi-explicit-route] [--tsi-crossbar-source <1>] [--tsi-packet <188|192|204|130>] [--tsi-use-sync] [--tsi-parallel] [--tsi-positive-edge] [--tsi-preserve-config]
              [--pid <0..8191>|--pat-section] [--run-after-filter] [--dry-run]
   mkra remux4k --out <path> [--seconds <n>] [--tsid <hex>] [--dry-run]
   mkra tune4k  --sid <101|102|141|151|161|171|181|211|221|231> [--oid <n>] [--dry-run]
@@ -2334,11 +2334,15 @@ fn cmd_tsrec(opts: &Options) -> i32 {
     // keep the same explicit gate used by the read-only probe commands so a
     // standby run cannot be mistaken for a negative TS_RECODER result.
     warn_if_standby();
-    let mut file = match std::fs::File::create(&out) {
-        Ok(file) => file,
-        Err(e) => {
-            eprintln!("mkra: cannot create {out}: {e}");
-            return 1;
+    let mut file: Box<dyn Write> = if out == "-" {
+        Box::new(io::stdout())
+    } else {
+        match std::fs::File::create(&out) {
+            Ok(file) => Box::new(file),
+            Err(e) => {
+                eprintln!("mkra: cannot create {out}: {e}");
+                return 1;
+            }
         }
     };
     let drv = match XcDrv::open_path(&opts.dev) {
@@ -3604,12 +3608,12 @@ fn cmd_demux_core(opts: &Options) -> i32 {
             let ratio = xcdrv::ts_sync_ratio(&sample);
             if opts.demux_pat_section {
                 let pats = valid_pat_sections(&sample);
-                println!("demux: wrote {total} section bytes; valid PAT sections {pats}");
+                eprintln!("demux: wrote {total} section bytes; valid PAT sections {pats}");
                 return if total > 0 && pats > 0 { 0 } else { 1 };
             }
-            println!("demux: wrote {total} bytes; 188-byte sync ratio {ratio:.4}");
+            eprintln!("demux: wrote {total} bytes; 188-byte sync ratio {ratio:.4}");
             if opts.demux_no_filter {
-                println!("demux: Gate 5A input binding lifecycle completed without a PID filter");
+                eprintln!("demux: Gate 5A input binding lifecycle completed without a PID filter");
                 0
             } else if total == 0 || ratio < 0.75 {
                 1
