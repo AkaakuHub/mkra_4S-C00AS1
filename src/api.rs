@@ -169,6 +169,7 @@ fn write_channel(o: &mut Obj, c: &Channel, with_services: bool) {
         .str("channel", &c.key)
         .str("name", &c.name);
     if with_services {
+        o.num("transportStreamId", c.tsid);
         o.arr("services", |a| {
             for s in &c.services {
                 a.obj(|o| write_service(o, s, None));
