@@ -95,7 +95,7 @@ USAGE:
   mkra dmd-doset-probe
   mkra dmd-doset-route-probe
   mkra dmd-doset-t-route-probe
-  mkra dmd-serial-route-probe --out <path> --seconds <1..8> --tsi-port 0 [--tsi-logical-port <0|1>]
+  mkra dmd-serial-route-probe --out <path> --seconds <1..8> --tsi-port <0|1> [--tsi-logical-port <0|1>]
   mkra dmd-tsset2-probe --out <path> --seconds <1..8> --tsi-port <0|1> [--tsi-logical-port <0|1>]
   mkra dmd-tsa-probe
   mkra dmd-tsout-base | dmd-tsout-tlv
@@ -564,8 +564,7 @@ fn cmd_dmd_doset_probe(route_a: bool, doset_t_enabled: bool) -> i32 {
 
 fn cmd_dmd_output_probe(opts: &Options, tsset2_only: bool) -> i32 {
     if opts.out.is_none()
-        || (tsset2_only && opts.tsi_port > 1)
-        || (!tsset2_only && opts.tsi_port != 0)
+        || opts.tsi_port > 1
         || opts.demux_no_filter
         || !opts.pids.is_empty()
         || opts.demux_pat_section
