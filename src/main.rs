@@ -41,6 +41,8 @@ mod json;
 mod remux4k;
 mod si;
 mod snapshot;
+#[cfg(feature = "software-cas")]
+mod software_cas;
 mod stream;
 mod sys;
 mod testts;

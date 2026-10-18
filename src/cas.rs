@@ -46,10 +46,18 @@ fn fail(s: impl Into<String>) -> io::Error {
     io::Error::other(s.into())
 }
 #[derive(Debug)]
-pub(crate) struct EcmRejected(u16);
+pub(crate) enum EcmRejected {
+    Native(u16),
+    #[cfg(feature = "software-cas")]
+    Software(i32),
+}
 impl std::fmt::Display for EcmRejected {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "ECM rejected with return code {:04X}", self.0)
+        match self {
+            Self::Native(code) => write!(f, "ECM rejected with return code {code:04X}"),
+            #[cfg(feature = "software-cas")]
+            Self::Software(code) => write!(f, "software ECM rejected with result {code}"),
+        }
     }
 }
 impl std::error::Error for EcmRejected {}
@@ -327,10 +335,14 @@ impl NativeCard {
                 )));
             }
             let code = u16::from_be_bytes([data[4], data[5]]);
+            #[cfg(feature = "software-cas")]
+            if code == 0xa103 {
+                return crate::software_cas::ecm(&section[8..section.len() - 4]);
+            }
             if ![0x0200, 0x0400, 0x0800].contains(&code) {
                 return Err(io::Error::new(
                     io::ErrorKind::PermissionDenied,
-                    EcmRejected(code),
+                    EcmRejected::Native(code),
                 ));
             }
             Ok([

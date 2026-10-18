@@ -1,12 +1,14 @@
 #!/bin/sh
 # Cross-build the device binary from macOS without Docker or a cross gcc.
 #
-# The crate is pure Rust with no C dependencies, so rust-lld links it directly.
+# The default build is pure Rust, so rust-lld links it directly.
 # Rust's musl targets default to link-self-contained, which supplies crt1.o and
 # libc.a from the bundled musl, so no sysroot is needed.
 #
 # Settings live here rather than in .cargo/config.toml so that a checkout has
 # no hidden build state.
+# Optional GPLv3-linked build: set YAKISOBA_LIB_DIR to an ARMv7 musl static
+# libyakisoba.a directory and pass --features software-cas explicitly.
 set -eu
 
 TARGET=armv7-unknown-linux-musleabihf

@@ -11,6 +11,9 @@ license = "MIT"
 # dependency-free build stays reproducible offline.
 [dependencies]
 
+[features]
+software-cas = []
+
 [profile.release]
 opt-level = "s"      # the box is a dual-core ARMv7; size beats vectorisation here
 lto = true
