@@ -109,7 +109,9 @@ pub fn print_p4_queue() -> io::Result<()> {
     }
     let base = sg_av + 0x220 + 2 * 0x40;
     let data = kmem.read(base, 0x20)?;
+    let ready_mask = kmem.u32(sg_av + (0x130 + 2) * 4)?;
     println!("XCode6 P4 host queue (read-only), base={base:#010x}:");
+    println!("  ready_mask={ready_mask:#010x}");
     for (class, pair) in data.chunks_exact(8).enumerate() {
         let head = u32::from_le_bytes(pair[..4].try_into().unwrap());
         let tail = u32::from_le_bytes(pair[4..].try_into().unwrap());
