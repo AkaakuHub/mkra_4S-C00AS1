@@ -1,10 +1,15 @@
+use std::collections::BTreeSet;
 use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant};
 
 use crate::remux4k::{AUDIO_PID, PCR_PID, PMT_PID, VIDEO_PID};
 use crate::si::{crc32_mpeg, mirakurun_program_id, SiDb, TID_MH_EIT_PF};
 
-pub fn convert_present_following(section: &[u8]) -> Option<Vec<u8>> {
+fn convert_present_following(
+    section: &[u8],
+    db: &SiDb,
+    warnings: &mut BTreeSet<String>,
+) -> Option<Vec<u8>> {
     if section.len() < 18
         || section[0] != TID_MH_EIT_PF
         || section[5] & 1 == 0
@@ -15,22 +20,39 @@ pub fn convert_present_following(section: &[u8]) -> Option<Vec<u8>> {
         return None;
     }
     let end = section.len() - 4;
-    let mut result = section[..14].to_vec();
-    result[0] = 0x4e;
-    result[13] = 0x4e;
+    let mut events = Vec::new();
     let mut offset = 14;
     while offset < end {
         if offset + 12 > end {
             return None;
         }
-        let descriptor_length =
+        let length =
             (usize::from(section[offset + 10] & 15) << 8) | usize::from(section[offset + 11]);
-        if offset + 12 + descriptor_length > end {
+        if offset + 12 + length > end {
             return None;
         }
+        events.push(offset);
+        offset += 12 + length;
+    }
+    let mut result = section[..14].to_vec();
+    result[0] = 0x4e;
+    result[13] = 0x4e;
+    let nid = u16::from_be_bytes([section[10], section[11]]);
+    let sid = u16::from_be_bytes([section[3], section[4]]);
+    for (index, offset) in events.iter().copied().enumerate() {
+        let eid = u16::from_be_bytes([section[offset], section[offset + 1]]);
+        let budget = 4096usize.checked_sub(4 + result.len() + (events.len() - index) * 12)?;
+        let descriptors = db
+            .programs
+            .get(&mirakurun_program_id(nid, sid, eid))
+            .map(|program| crate::event_descriptors::descriptors(program, budget, warnings))
+            .unwrap_or_default();
         result.extend_from_slice(&section[offset..offset + 10]);
-        result.extend_from_slice(&[section[offset + 10] & 0xf0, 0]);
-        offset += 12 + descriptor_length;
+        result.extend_from_slice(&[
+            (section[offset + 10] & 0xf0) | ((descriptors.len() >> 8) as u8),
+            descriptors.len() as u8,
+        ]);
+        result.extend_from_slice(&descriptors);
     }
     finish_section(&mut result);
     Some(result)
@@ -78,6 +100,8 @@ pub struct ProgramTables {
     tags: Option<(u8, u8)>,
     version: u8,
     continuity: u8,
+    eit_version: u8,
+    warnings: BTreeSet<String>,
 }
 
 impl ProgramTables {
@@ -93,6 +117,8 @@ impl ProgramTables {
             tags: None,
             version: 0,
             continuity: 0,
+            eit_version: 0,
+            warnings: BTreeSet::new(),
         }
     }
 
@@ -104,12 +130,32 @@ impl ProgramTables {
                 eprintln!("mkra: cannot read EPG for program tables");
                 return;
             };
-            self.sections = db
+            let mut warnings = BTreeSet::new();
+            let mut sections: Vec<_> = db
                 .present_following
                 .iter()
                 .filter(|((nid, sid, _), _)| *nid == self.network_id && *sid == self.service_id)
-                .map(|(_, section)| section.clone())
+                .filter_map(|(_, section)| convert_present_following(section, &db, &mut warnings))
                 .collect();
+            for warning in warnings.difference(&self.warnings) {
+                eprintln!("mkra: program tables: {warning}");
+            }
+            self.warnings = warnings;
+            let changed = sections.len() != self.sections.len()
+                || sections.iter().zip(&self.sections).any(|(new, old)| {
+                    new.len() != old.len()
+                        || new[..5] != old[..5]
+                        || new[6..new.len() - 4] != old[6..old.len() - 4]
+                });
+            if changed {
+                self.eit_version = (self.eit_version + 1) & 31;
+                for section in &mut sections {
+                    section[5] = (section[5] & 0xc1) | (self.eit_version << 1);
+                    section.truncate(section.len() - 4);
+                    section.extend_from_slice(&crc32_mpeg(section).to_be_bytes());
+                }
+                self.sections = sections;
+            }
             let tags = self
                 .sections
                 .iter()

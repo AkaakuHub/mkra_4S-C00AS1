@@ -39,6 +39,8 @@ mod http;
 mod i2c_lock;
 mod json;
 mod remux4k;
+mod arib_text;
+mod event_descriptors;
 mod program_tables;
 mod si;
 mod snapshot;
