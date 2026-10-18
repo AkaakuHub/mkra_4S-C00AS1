@@ -1246,11 +1246,10 @@ fn cmd_serve(opts: &Options) -> i32 {
         if !opts.remux4k_backend || !opts.tune || opts.file.is_some() || opts.test_pattern || opts.raw_stream {
             eprintln!("mkra: --bs2k requires --remux4k --tune, without file/test/raw");return 2;
         }
-        table.add_verified_bs2k();
         if let Some(path)=&opts.isdbs_channels {
             let result=std::fs::read_to_string(path).map_err(|e|e.to_string()).and_then(|s|table.add_isdbs_tsv(&s));
             if let Err(e)=result {eprintln!("mkra: ISDB-S channel table: {e}");return 2;}
-        }
+        } else {table.add_verified_bs2k();}
     }
     if opts.isdbs_channels.is_some() && !opts.bs2k {eprintln!("mkra: --isdbs-channels requires --bs2k");return 2;}
     // Cross-process ownership for the integrated physical frontend.
