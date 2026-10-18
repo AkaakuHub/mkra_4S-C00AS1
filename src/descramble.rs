@@ -1,5 +1,8 @@
 //! Streaming PSI/ECM tracking and CPU MULTI2. No keys are logged or written.
-use crate::{cas::NativeCard, multi2};
+use crate::{
+    cas::{EcmRejected, NativeCard},
+    multi2,
+};
 use std::{
     collections::{BTreeMap, BTreeSet, VecDeque},
     io,
@@ -283,7 +286,11 @@ impl<C: Card> Decoder<C> {
             }
             let controls = match self.card.ecm(&s) {
                 Ok(controls) => controls,
-                Err(error) if error.kind() == io::ErrorKind::PermissionDenied => {
+                Err(error)
+                    if error
+                        .get_ref()
+                        .is_some_and(|cause| cause.is::<EcmRejected>()) =>
+                {
                     self.keys.remove(&pid);
                     self.rejected.insert(pid, s);
                     eprintln!("mkra: ECM PID {pid:#x}: {error}; preserving encrypted packets");
@@ -340,7 +347,7 @@ impl<C: Card> Decoder<C> {
             };
             let key = match self.keys.get(&ecm) {
                 Some(key) => key,
-                None if self.rejected.contains_key(&ecm) => {
+                None if self.wanted_service.is_some() || self.rejected.contains_key(&ecm) => {
                     *self.encrypted_passthrough.entry(pid).or_default() += 1;
                     out.extend_from_slice(&p);
                     self.packets += 1;
@@ -391,19 +398,22 @@ impl<C: Card> Decoder<C> {
                     && self.wanted_pmt.map_or(self.pmts == self.seen_pmts, |pid| {
                         self.seen_pmts.contains(&pid)
                     })
-                    && (self.routes.is_empty() || !self.keys.is_empty() || !self.rejected.is_empty())
-                    && if self.scrambled_pids.is_empty() {
-                        self.routes.values().all(|pid| {
-                            self.keys.contains_key(pid) || self.rejected.contains_key(pid)
-                        })
-                    } else {
-                        self.scrambled_pids.iter().all(|&pid| {
-                            self.ecm_for_pid(pid).map_or(
-                                self.wanted_service.is_some() && !self.routes.contains_key(&pid),
-                                |ecm| self.keys.contains_key(&ecm) || self.rejected.contains_key(&ecm),
-                            )
-                        })
-                    }
+                    && (self.wanted_service.is_some()
+                        || (self.routes.is_empty()
+                            || !self.keys.is_empty()
+                            || !self.rejected.is_empty())
+                            && if self.scrambled_pids.is_empty() {
+                                self.routes.values().all(|pid| {
+                                    self.keys.contains_key(pid) || self.rejected.contains_key(pid)
+                                })
+                            } else {
+                                self.scrambled_pids.iter().all(|&pid| {
+                                    self.ecm_for_pid(pid).is_some_and(|ecm| {
+                                        self.keys.contains_key(&ecm)
+                                            || self.rejected.contains_key(&ecm)
+                                    })
+                                })
+                            })
                 {
                     self.started = true;
                     while let Some(p) = self.waiting.pop_front() {
