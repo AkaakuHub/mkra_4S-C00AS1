@@ -20,6 +20,7 @@
 mod api;
 mod bs2k;
 mod cas;
+mod channel_sync;
 mod descramble;
 #[path = "../tools/multi2.rs"]
 mod multi2;
@@ -1242,12 +1243,18 @@ fn cmd_serve(opts: &Options) -> i32 {
         }
     };
     table.set_channel_type(&opts.channel_type);
+    let isdbs_base = opts.isdbs_channels.as_ref().map(|_| table.clone());
+    let mut isdbs_loaded = None;
     if opts.bs2k {
         if !opts.remux4k_backend || !opts.tune || opts.file.is_some() || opts.test_pattern || opts.raw_stream {
             eprintln!("mkra: --bs2k requires --remux4k --tune, without file/test/raw");return 2;
         }
         if let Some(path)=&opts.isdbs_channels {
-            let result=std::fs::read_to_string(path).map_err(|e|e.to_string()).and_then(|s|table.add_isdbs_tsv(&s));
+            let result=std::fs::read_to_string(path).map_err(|e|e.to_string()).and_then(|s| {
+                table.add_isdbs_tsv(&s)?;
+                isdbs_loaded = Some(s);
+                Ok(())
+            });
             if let Err(e)=result {eprintln!("mkra: ISDB-S channel table: {e}");return 2;}
         } else {table.add_verified_bs2k();}
     }
@@ -1614,7 +1621,7 @@ fn cmd_serve(opts: &Options) -> i32 {
     if opts.idle_sleep_secs > 0 {
         if let Err(e) = power::start_idle_task(
             Arc::clone(&broker), Duration::from_secs(opts.idle_sleep_secs),
-            resume_required, cleanup_failed,
+            resume_required, Arc::clone(&cleanup_failed),
         ) {
             eprintln!("mkra: cannot start idle receiver control: {e}");
             return 1;
@@ -1635,6 +1642,17 @@ fn cmd_serve(opts: &Options) -> i32 {
         api::MKRA_VERSION,
         state.table.channels.len()
     );
+
+    if let (Some(path), Some(loaded), Some(base)) =
+        (&opts.isdbs_channels, isdbs_loaded, isdbs_base)
+    {
+        if let Err(error) = channel_sync::start(
+            path.clone(), loaded, base, Arc::clone(&broker), cleanup_failed,
+        ) {
+            eprintln!("mkra: cannot start ISDB-S channel table synchronization: {error}");
+            return 1;
+        }
+    }
 
     let handler_state = Arc::clone(&state);
     let result = http::serve(
