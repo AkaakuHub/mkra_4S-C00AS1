@@ -193,6 +193,11 @@ pub mod procmem {
     use std::fs;
     use std::io;
 
+    /// Fixed process addresses are valid only for the independently analysed ELF.
+    pub fn verify_layout(pid: u32) -> io::Result<()> {
+        super::verify_tuner_binary(pid)
+    }
+
     /// Find the pid whose `/proc/<pid>/comm` is exactly `name`.
     pub fn find_pid(name: &str) -> io::Result<u32> {
         for entry in fs::read_dir("/proc")? {
@@ -296,6 +301,8 @@ pub mod procmem {
         ))
     }
 
+    pub fn verify_layout(_pid: u32) -> io::Result<()> { unsupported() }
+
     pub fn find_pid(_name: &str) -> io::Result<u32> {
         unsupported()
     }
@@ -334,6 +341,12 @@ pub mod procmem {
 mod maps_tests {
     /// A real `tuner` maps line shape: the ET_EXEC data/bss segment must come
     /// back writable, and a read-only text mapping must not.
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn fixed_address_access_rejects_unrecognised_executable() {
+        assert!(super::procmem::verify_layout(std::process::id()).is_err());
+    }
+
     #[test]
     fn writable_lookup_matches_maps_permissions() {
         let maps = "\

@@ -20,13 +20,6 @@ pub struct IsdbsStatus {
     pub ts_serial: u8,
 }
 
-pub struct IsdbsTmccTsids {
-    pub lock_before: u8,
-    pub lock_after: u8,
-    pub requested: u16,
-    pub tsids: [u16; 8],
-}
-
 /// Result of the one-byte ISDB-S/TLV output-mode exclusion repair.
 pub struct IsdbsTsExclusiveResult {
     pub before: u8,
@@ -44,35 +37,37 @@ pub struct IsdbsTsExclusiveResult {
 /// test of that model; it changes nothing.
 pub struct DmdOutputRegs {
     pub lock: u8,
-    pub isdbs_tsid: u16,
-    pub isdbs_tsset: u8,
     /// `(register, value)` for I2C 7-bit `0x10` (SC1501A bank 0).
     pub bank0: [(u8, u8); 6],
+    /// ISDB-S selection controls, not a received PAT or a selected-stream lock.
+    /// `tuner:0x2304e..0x230be` programs TSID at 2f/30 and mode at 31.
+    pub bank2_selection: [u8; 3],
     /// `(register, value)` for I2C 7-bit `0x17` (SC1501A bank 7).
     pub bank7: [(u8, u8); 9],
-    pub isdbt_page: [(u8, u8); 9],
 }
 
-pub struct HizProbeResult {
-    pub before: (bool, u8),
-    pub active_readback: (u8, u8),
-    pub enabled: (bool, u8),
-    pub restored: (bool, u8),
+/// Received monitor windows, independent of the requested TSID registers.
+pub struct IsdbsTmcc {
+    pub locks: [u8; 2],
+    pub selectors: [u8; 2],
+    pub indexed_tsids: [u16; 8],
+    pub raw: [u8; 40],
 }
 
-pub struct DosetProbeResult {
-    pub before: [(bool, u8); 2],
-    pub active_readback: u8,
-    pub enabled: [(bool, u8); 2],
-    pub restored: [(bool, u8); 2],
+/// DMD_isdbs_tmcc_tbl information 59..66: MSB-first fields at bit 189+16*n.
+pub fn tmcc_tsid_fields(raw: &[u8; 40]) -> [u16; 8] {
+    std::array::from_fn(|i| {
+        let start = 189 + 16 * i;
+        (start..start + 16).fold(0u16, |value, bit| {
+            (value << 1) | u16::from((raw[bit / 8] >> (7 - bit % 8)) & 1)
+        })
+    })
 }
 
 /// Bank-0 registers sampled by [`DmdOutputRegs`], in report order.
 pub const DMD_BANK0_REGS: [u8; 6] = [0x0b, 0x0c, 0x13, 0x16, 0x18, 0xcc];
 /// Bank-7 registers sampled by [`DmdOutputRegs`], in report order.
 pub const DMD_BANK7_REGS: [u8; 9] = [0x0a, 0x72, 0x73, 0x74, 0x75, 0x76, 0x7b, 0x7d, 0x8d];
-pub const DMD_ISDBT_ROUTE_REGS: [u8; 9] =
-    [0x05, 0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b, 0x0d, 0x0f];
 
 /// Bank-7 bytes that `regset_TLV_SPI_1BIT` + `DMD_set_tsout(systype=0x0d)`
 /// leave behind, and that no ISDB-S or ISDB-T path rewrites.
@@ -123,8 +118,8 @@ impl TsoutTarget {
 /// MPEG-TS standard table (`regset_ISDBS`, `regset_ISDBT_6MHz`, `regset_DVBC`,
 /// `regset_DVBT_*`, `regset_QAMB_*`, `regset_ISDBC_*`); bit 5 is set only in
 /// the two serial widths. `0x13` is written by no table except the TLV_SPI
-/// ones. On this board the only output wired to XCode6 TSI0 is that 1-bit
-/// serial port, which is what the 4K path uses.
+/// ones. The working 4K path uses the 1-bit serial port on XCode6 TSI0.
+/// Other physical wiring has not been established by continuity measurements.
 pub const SERIAL_1BIT_IFACE: [(u8, u8); 3] = [(0x13, 0x04), (0x16, 0x21), (0xcc, 0x80)];
 /// What `regset_ISDBS` + `DMD_set_tsout(case 0/1)` leave behind, measured on
 /// this box in Gate 5C1/5C2.
@@ -153,6 +148,11 @@ pub enum TsoutInterface {
     Mode16Serial,
     /// Rollback of [`TsoutInterface::Mode16Serial`].
     Mode16Isdbs,
+    /// Hypothesis: bit 5 selects serial width independently of bit 0 (TLV).
+    /// This value is experimental, not a confirmed vendor TS profile.
+    TsSerial20,
+    /// Restore the exact pre-experiment byte.
+    TsSerial20Restore,
 }
 
 impl TsoutInterface {
@@ -162,6 +162,8 @@ impl TsoutInterface {
             TsoutInterface::IsdbsDefault => &ISDBS_IFACE,
             TsoutInterface::Mode16Serial => &MODE16_SERIAL,
             TsoutInterface::Mode16Isdbs => &MODE16_ISDBS,
+            TsoutInterface::TsSerial20 => &[(0x16, 0x20)],
+            TsoutInterface::TsSerial20Restore => &MODE16_ISDBS,
         }
     }
 
@@ -171,6 +173,8 @@ impl TsoutInterface {
             TsoutInterface::IsdbsDefault => &SERIAL_1BIT_IFACE,
             TsoutInterface::Mode16Serial => &MODE16_ISDBS,
             TsoutInterface::Mode16Isdbs => &MODE16_SERIAL,
+            TsoutInterface::TsSerial20 => &MODE16_ISDBS,
+            TsoutInterface::TsSerial20Restore => &[(0x16, 0x20)],
         }
     }
 }
@@ -207,8 +211,8 @@ pub fn classify_tsout(regs: &[(u8, u8)]) -> TsoutFraming {
 #[cfg(all(target_os = "linux", target_arch = "arm"))]
 mod arm_linux {
     use super::{
-        is_isdbt_locked, DmdOutputRegs, DosetProbeResult, HizProbeResult, IsdbsStatus, IsdbsTmccTsids, IsdbsTsExclusiveResult, TsoutRestoreResult,
-        TuneResult, Write, DMD_BANK0_REGS, DMD_BANK7_REGS, DMD_ISDBT_ROUTE_REGS,
+        is_isdbt_locked, DmdOutputRegs, IsdbsStatus, IsdbsTsExclusiveResult, TsoutRestoreResult,
+        TuneResult, Write, DMD_BANK0_REGS, DMD_BANK7_REGS,
     };
     use crate::i2c_lock::I2c0Guard;
     use crate::sys;
@@ -421,43 +425,6 @@ mod arm_linux {
         }
     }
 
-    pub fn read_isdbs_tmcc_tsids() -> io::Result<IsdbsTmccTsids> {
-        let guard = I2c0Guard::attach_and_take()?;
-        let bus = I2c0::open()?;
-        let result = (|| -> io::Result<IsdbsTmccTsids> {
-            let lock_before = bus.read(0x12, 0x5e, 1)?[0];
-            if lock_before & 0x20 == 0 {
-                return Err(io::Error::new(io::ErrorKind::WouldBlock, "ISDB-S is not locked"));
-            }
-            let requested_bytes = bus.read(0x12, 0x2f, 2)?;
-            let requested = u16::from_be_bytes([requested_bytes[0], requested_bytes[1]]);
-            let mut bytes = [0u8; 17];
-            for (index, byte) in bytes.iter_mut().enumerate() {
-                bus.write(0x12, 0x65, &[23 + index as u8])?;
-                *byte = bus.read(0x12, 0x66, 1)?[0];
-            }
-            let mut tsids = [0u16; 8];
-            for (index, tsid) in tsids.iter_mut().enumerate() {
-                let start = index * 2;
-                let window = u32::from_be_bytes([
-                    0,
-                    bytes[start],
-                    bytes[start + 1],
-                    bytes[start + 2],
-                ]);
-                *tsid = ((window >> 3) & 0xffff) as u16;
-            }
-            let lock_after = bus.read(0x12, 0x5e, 1)?[0];
-            Ok(IsdbsTmccTsids { lock_before, lock_after, requested, tsids })
-        })();
-        let release = guard.release();
-        match (result, release) {
-            (Err(e), _) => Err(e),
-            (Ok(_), Err(e)) => Err(e),
-            (Ok(v), Ok(())) => Ok(v),
-        }
-    }
-
     /// Read the SC1501A output-framing registers without changing any of them.
     ///
     /// Bank 0 is I2C 7-bit `0x10`, bank 7 is `0x17` (`unit 0`: `bank + 0x10`,
@@ -469,9 +436,6 @@ mod arm_linux {
         let bus = I2c0::open()?;
         let result = (|| -> io::Result<DmdOutputRegs> {
             let lock = bus.read(0x12, 0x5e, 1)?[0];
-            let tsid = bus.read(0x12, 0x2f, 2)?;
-            let isdbs_tsid = u16::from_be_bytes([tsid[0], tsid[1]]);
-            let isdbs_tsset = bus.read(0x12, 0x31, 1)?[0];
             let mut bank0 = [(0u8, 0u8); 6];
             for (slot, reg) in bank0.iter_mut().zip(DMD_BANK0_REGS) {
                 *slot = (reg, bus.read(0x10, reg, 1)?[0]);
@@ -480,11 +444,9 @@ mod arm_linux {
             for (slot, reg) in bank7.iter_mut().zip(DMD_BANK7_REGS) {
                 *slot = (reg, bus.read(0x17, reg, 1)?[0]);
             }
-            let mut isdbt_page = [(0u8, 0u8); 9];
-            for (slot, reg) in isdbt_page.iter_mut().zip(DMD_ISDBT_ROUTE_REGS) {
-                *slot = (reg, bus.read(0x16, reg, 1)?[0]);
-            }
-            Ok(DmdOutputRegs { lock, isdbs_tsid, isdbs_tsset, bank0, bank7, isdbt_page })
+            let selection = bus.read(0x12, 0x2f, 3)?;
+            let bank2_selection = [selection[0], selection[1], selection[2]];
+            Ok(DmdOutputRegs { lock, bank0, bank2_selection, bank7 })
         })();
         let release = guard.release();
         match (result, release) {
@@ -494,288 +456,109 @@ mod arm_linux {
         }
     }
 
-    pub fn probe_hiz(route_a: bool) -> io::Result<HizProbeResult> {
+    /// Compare native info44 relative-TS0 selection with info45 TSID selection.
+    /// Fixed diagnostic for BS-1/4010 only. Native tuner:23018 masks reg31
+    /// with 0x0f and writes 8 for relative zero; 2304e clears bit3 for TSID.
+    /// Verify a live received 4010 at relative zero before changing reg31.
+    pub fn select_isdbs_relative_zero(restore: bool) -> io::Result<super::IsdbsTsExclusiveResult> {
         let guard = I2c0Guard::attach_and_take()?;
         let bus = I2c0::open()?;
-        let result = (|| -> io::Result<HizProbeResult> {
-            let lock = bus.read(0x12, 0x5e, 1)?[0];
-            let ts_pin = bus.read(0x10, 0x0b, 1)?[0];
-            let selector = bus.read(0x10, 0xcc, 1)?[0];
-            let hiz1 = bus.read(0x16, 0x0a, 1)?[0];
-            let hiz2 = bus.read(0x16, 0x0b, 1)?[0];
-            let tsset1 = bus.read(0x16, 0x05, 1)?[0];
-            let tsset3 = bus.read(0x16, 0x07, 1)?[0];
-            if lock & 0x20 == 0 || ts_pin != 1 || selector != 0xc0 || (hiz1, hiz2) != (0xff, 0xff) {
-                return Err(io::Error::other(format!(
-                    "refuse: lock={lock:02x} ts={ts_pin:02x} selector={selector:02x} hiz={hiz1:02x}/{hiz2:02x}"
-                )));
-            }
-            if route_a && (tsset1, tsset3) != (0, 0) {
-                return Err(io::Error::other(format!(
-                    "refuse: TS A/B selectors are {tsset1:02x}/{tsset3:02x}, expected 00/00"
-                )));
-            }
-            let drv = crate::xcdrv::XcDrv::open_path(crate::xcdrv::DEV_PATH)?;
-            let before = drv.tsi_status(1)?;
-            let sample = (|| -> io::Result<((u8, u8), (bool, u8))> {
-                bus.write(0x16, 0x0a, &[0x80])?;
-                bus.write(0x16, 0x0b, &[0xe0])?;
-                if route_a {
-                    bus.write(0x16, 0x05, &[0x0c])?;
-                    bus.write(0x16, 0x07, &[0x60])?;
+        let result = (|| {
+            for (bank, reg, expected) in [
+                (0x10, 0x0b, 1), (0x10, 0x16, 0), (0x17, 0x72, 0),
+                (0x12, 0x2f, 0x40), (0x12, 0x30, 0x10),
+                (0x12, 0x31, if restore { 8 } else { 0 }),
+            ] {
+                let got = bus.read(bank, reg, 1)?[0];
+                if got != expected {
+                    return Err(io::Error::other(format!("relative-TS0 guard {bank:02x}:{reg:02x}={got:02x}, expected {expected:02x}")));
                 }
-                let active1 = bus.read(0x16, 0x0a, 1)?[0];
-                let active2 = bus.read(0x16, 0x0b, 1)?[0];
-                drv.configure_product_mpeg_ts_tsi(1)?;
-                std::thread::sleep(Duration::from_secs(1));
-                Ok(((active1, active2), drv.tsi_status(1)?))
-            })();
-            let restore_tsset1 = if route_a { bus.write(0x16, 0x05, &[0]) } else { Ok(()) };
-            let restore_tsset3 = if route_a { bus.write(0x16, 0x07, &[0]) } else { Ok(()) };
-            let restore1 = bus.write(0x16, 0x0a, &[0xff]);
-            let restore2 = bus.write(0x16, 0x0b, &[0xff]);
-            restore_tsset1?;
-            restore_tsset3?;
-            restore1?;
-            restore2?;
-            if route_a && (bus.read(0x16, 0x05, 1)?[0], bus.read(0x16, 0x07, 1)?[0]) != (0, 0) {
-                return Err(io::Error::other("TS A/B selectors restore readback mismatch"));
             }
-            if bus.read(0x16, 0x0a, 1)?[0] != 0xff
-                || bus.read(0x16, 0x0b, 1)?[0] != 0xff
-            {
-                return Err(io::Error::other("HIZ restore readback mismatch"));
+            if !restore {
+                if bus.read(0x12, 0x5e, 1)?[0] & 0x20 == 0 {
+                    return Err(io::Error::other("relative-TS0 requires ISDB-S lock"));
+                }
+                let saved = bus.read(0x12, 0x62, 1)?[0];
+                let monitor = (|| -> io::Result<[u8; 2]> {
+                    bus.write(0x12, 0x62, &[0])?;
+                    Ok([bus.read(0x12, 0x63, 1)?[0], bus.read(0x12, 0x64, 1)?[0]])
+                })();
+                let restored = bus.write(0x12, 0x62, &[saved]);
+                restored?;
+                if bus.read(0x12, 0x62, 1)?[0] != saved {
+                    return Err(io::Error::other("relative-TS monitor selector restore failed"));
+                }
+                if monitor? != [0x40, 0x10] {
+                    return Err(io::Error::other("received relative TS0 is not 4010"));
+                }
             }
-            let (active_readback, enabled) = sample?;
-            let restored = drv.tsi_status(1)?;
-            Ok(HizProbeResult { before, active_readback, enabled, restored })
+            let before = if restore { 8 } else { 0 };
+            let after = if restore { 0 } else { 8 };
+            bus.mask_write(0x12, 0x31, if restore { 8 } else { 15 }, after)?;
+            if bus.read(0x12, 0x31, 1)?[0] != after {
+                bus.write(0x12, 0x31, &[before])?;
+                return Err(io::Error::other("relative-TS0 readback failed; rollback attempted"));
+            }
+            Ok(super::IsdbsTsExclusiveResult { before, after })
         })();
         let release = guard.release();
         match (result, release) {
-            (Err(e), _) => Err(e),
-            (Ok(_), Err(e)) => Err(e),
-            (Ok(v), Ok(())) => Ok(v),
+            (Err(e), _) | (Ok(_), Err(e)) => Err(e),
+            (Ok(value), Ok(())) => Ok(value),
         }
     }
 
-    pub fn probe_doset(route_a: bool, doset_t_enabled: bool) -> io::Result<DosetProbeResult> {
+    /// Reproduce the vendor's two bounded ISDB-S monitor reads. Only the
+    /// volatile monitor selectors 62/65 are written; both are restored under
+    /// the same I2C semaphore even when reading fails. No tuning/output writes.
+    /// Native references: tuner:0x251d0 (info45), 0x260fc (TMCC window).
+    pub fn read_isdbs_tmcc() -> io::Result<super::IsdbsTmcc> {
         let guard = I2c0Guard::attach_and_take()?;
         let bus = I2c0::open()?;
-        let result = (|| -> io::Result<DosetProbeResult> {
-            let lock = bus.read(0x12, 0x5e, 1)?[0];
-            let pin = bus.read(0x10, 0x0b, 1)?[0];
-            let mode = bus.read(0x10, 0x16, 1)?[0];
-            let enable = bus.read(0x10, 0xcc, 1)?[0];
-            let doset = bus.read(0x12, 0x73, 1)?[0];
-            let doset_t = bus.read(0x16, 0xcf, 1)?[0];
-            let hiz = [bus.read(0x16, 0x0a, 1)?[0], bus.read(0x16, 0x0b, 1)?[0]];
-            let route = [bus.read(0x16, 0x05, 1)?[0], bus.read(0x16, 0x07, 1)?[0]];
-            if lock & 0x20 == 0 || pin != 1 || mode != 0 || enable != 0xc0 || doset != 0 {
-                return Err(io::Error::other(format!(
-                    "refuse: lock={lock:02x} pin={pin:02x} mode={mode:02x} enable={enable:02x} doset={doset:02x}"
-                )));
+        let first_lock = bus.read(0x12, 0x5e, 1)?[0];
+        // The vendor get_info monitor does not require TS lock. Requiring it
+        // here would hide the received TSID table when the requested TSID is
+        // missing. Instead verify the known ISDB-S output signature, and
+        // report both raw lock bytes without treating unlocked data as valid.
+        if bus.read(0x10, 0x0b, 1)?[0] != 1
+            || bus.read(0x10, 0x16, 1)?[0] != 0
+            || bus.read(0x17, 0x72, 1)?[0] != 0 {
+            return Err(io::Error::other("TMCC monitor requires the known ISDB-S profile"));
+        }
+        let selectors = [bus.read(0x12, 0x62, 1)?[0], bus.read(0x12, 0x65, 1)?[0]];
+        let operation = (|| -> io::Result<super::IsdbsTmcc> {
+            let mut indexed_tsids = [0u16; 8];
+            for (i, slot) in indexed_tsids.iter_mut().enumerate() {
+                bus.write(0x12, 0x62, &[i as u8])?;
+                // The OEM reads these individually, so do the same.
+                let hi = bus.read(0x12, 0x63, 1)?[0];
+                let lo = bus.read(0x12, 0x64, 1)?[0];
+                *slot = u16::from_be_bytes([hi, lo]);
             }
-            if route_a && (hiz != [0xff, 0xff] || route != [0, 0]) {
-                return Err(io::Error::other(format!(
-                    "refuse: HIZ={hiz:02x?} route={route:02x?}"
-                )));
+            let mut raw = [0u8; 40];
+            for (i, slot) in raw.iter_mut().enumerate() {
+                bus.write(0x12, 0x65, &[i as u8])?;
+                *slot = bus.read(0x12, 0x66, 1)?[0];
             }
-            if doset_t_enabled && (!route_a || doset_t != 0xff) {
-                return Err(io::Error::other(format!(
-                    "refuse: full route requires DOSET1_T=ff, found {doset_t:02x}"
-                )));
+            let last_lock = bus.read(0x12, 0x5e, 1)?[0];
+            Ok(super::IsdbsTmcc { locks: [first_lock, last_lock], selectors, indexed_tsids, raw })
+        })();
+        // Always attempt both restores and release, independently of errors.
+        let restore_relative = bus.write(0x12, 0x62, &[selectors[0]]);
+        let restore_window = bus.write(0x12, 0x65, &[selectors[1]]);
+        let verify = (|| -> io::Result<()> {
+            if bus.read(0x12, 0x62, 1)?[0] != selectors[0]
+                || bus.read(0x12, 0x65, 1)?[0] != selectors[1] {
+                return Err(io::Error::other("TMCC monitor selectors did not restore"));
             }
-            let drv = crate::xcdrv::XcDrv::open_path(crate::xcdrv::DEV_PATH)?;
-            drv.configure_product_mpeg_ts_tsi(1)?;
-            let before = [drv.tsi_status(0)?, drv.tsi_status(1)?];
-            let sample = (|| -> io::Result<(u8, [(bool, u8); 2])> {
-                if route_a {
-                    bus.write(0x16, 0x0a, &[0x80])?;
-                    bus.write(0x16, 0x0b, &[0xe0])?;
-                    bus.write(0x16, 0x05, &[0x0c])?;
-                    bus.write(0x16, 0x07, &[0x60])?;
-                    bus.write(0x10, 0x16, &[0x21])?;
-                }
-                if doset_t_enabled {
-                    bus.write(0x16, 0xcf, &[0x95])?;
-                }
-                bus.write(0x12, 0x73, &[0x80])?;
-                let active_readback = bus.read(0x12, 0x73, 1)?[0];
-                std::thread::sleep(Duration::from_secs(1));
-                Ok((active_readback, [drv.tsi_status(0)?, drv.tsi_status(1)?]))
-            })();
-            let restores = if route_a {
-                [
-                    bus.write(0x12, 0x73, &[doset]),
-                    if doset_t_enabled { bus.write(0x16, 0xcf, &[doset_t]) } else { Ok(()) },
-                    bus.write(0x10, 0x16, &[mode]),
-                    bus.write(0x16, 0x07, &[route[1]]),
-                    bus.write(0x16, 0x05, &[route[0]]),
-                    bus.write(0x16, 0x0b, &[hiz[1]]),
-                    bus.write(0x16, 0x0a, &[hiz[0]]),
-                ]
-            } else {
-                [bus.write(0x12, 0x73, &[doset]), Ok(()), Ok(()), Ok(()), Ok(()), Ok(()), Ok(())]
-            };
-            for restore in restores {
-                restore?;
-            }
-            let restored_readback = bus.read(0x12, 0x73, 1)?[0];
-            if restored_readback != doset {
-                return Err(io::Error::other(format!(
-                    "DOSET1_S restore readback {restored_readback:02x}, expected {doset:02x}"
-                )));
-            }
-            if route_a {
-                let mode_after = bus.read(0x10, 0x16, 1)?[0];
-                let route_after = [bus.read(0x16, 0x05, 1)?[0], bus.read(0x16, 0x07, 1)?[0]];
-                let hiz_after = [bus.read(0x16, 0x0a, 1)?[0], bus.read(0x16, 0x0b, 1)?[0]];
-                if mode_after != mode || route_after != route || hiz_after != hiz {
-                    return Err(io::Error::other("combined route restore readback mismatch"));
-                }
-            }
-            if doset_t_enabled && bus.read(0x16, 0xcf, 1)?[0] != doset_t {
-                return Err(io::Error::other("DOSET1_T restore readback mismatch"));
-            }
-            let (active_readback, enabled) = sample?;
-            let restored = [drv.tsi_status(0)?, drv.tsi_status(1)?];
-            Ok(DosetProbeResult { before, active_readback, enabled, restored })
+            Ok(())
         })();
         let release = guard.release();
-        match (result, release) {
-            (Err(e), _) => Err(e),
-            (Ok(_), Err(e)) => Err(e),
-            (Ok(v), Ok(())) => Ok(v),
-        }
-    }
-
-    pub fn with_isdbs_serial_route<F>(capture: F, vendor_base: bool) -> io::Result<()>
-    where
-        F: FnOnce() -> io::Result<()>,
-    {
-        let guard = I2c0Guard::attach_and_take()?;
-        let bus = I2c0::open()?;
-        let result = (|| -> io::Result<()> {
-            let lock = bus.read(0x12, 0x5e, 1)?[0];
-            if lock & 0x20 == 0 {
-                return Err(io::Error::other(format!("ISDB-S is not locked: {lock:02x}")));
-            }
-            let mut changes = vec![
-                (0x16, 0x08, 0x01, 0xff),
-                (0x16, 0x09, 0x11, 0x00),
-                (0x16, 0x0a, 0xff, 0x80),
-                (0x16, 0x0b, 0xff, 0xe0),
-                (0x16, 0x05, 0x00, 0x0c),
-                (0x16, 0x06, 0x40, 0x00),
-                (0x16, 0x07, 0x00, 0x60),
-                (0x16, 0xcf, 0xff, 0x95),
-                (0x12, 0x73, 0x00, 0x80),
-                (0x10, 0x16, 0x00, 0x21),
-                (0x10, 0xcc, 0xc0, 0x80),
-            ];
-            if vendor_base {
-                changes.extend([
-                    (0x17, 0x73, 0x03, 0x24),
-                    (0x17, 0x75, 0x01, 0x00),
-                    (0x17, 0x7b, 0x67, 0x64),
-                    (0x17, 0x7d, 0x81, 0x01),
-                ]);
-            }
-            for &(addr, reg, before, _) in &changes {
-                let actual = bus.read(addr, reg, 1)?[0];
-                if actual != before {
-                    return Err(io::Error::other(format!(
-                        "refuse: {addr:02x}:{reg:02x} is {actual:02x}, expected {before:02x}"
-                    )));
-                }
-            }
-            let mut changed = 0;
-            let applied = (|| -> io::Result<()> {
-                for &(addr, reg, _, value) in &changes {
-                    bus.write(addr, reg, &[value])?;
-                    changed += 1;
-                }
-                for &(addr, reg, _, value) in &changes {
-                    if addr == 0x16 && matches!(reg, 0x0a | 0x0b | 0xcf) {
-                        continue;
-                    }
-                    let actual = bus.read(addr, reg, 1)?[0];
-                    if actual != value {
-                        return Err(io::Error::other(format!(
-                            "active readback mismatch at {addr:02x}:{reg:02x}: {actual:02x}"
-                        )));
-                    }
-                }
-                eprintln!("isdbs serial route active; capturing with all 11 register writes applied");
-                capture()
-            })();
-            let mut restore_error = None;
-            for &(addr, reg, before, _) in changes[..changed].iter().rev() {
-                if let Err(error) = bus.write(addr, reg, &[before]) {
-                    restore_error.get_or_insert(error);
-                }
-            }
-            let restored = (|| -> io::Result<()> {
-                for &(addr, reg, before, _) in &changes {
-                    if bus.read(addr, reg, 1)?[0] != before {
-                        return Err(io::Error::other(format!("restore mismatch at {addr:02x}:{reg:02x}")));
-                    }
-                }
-                Ok(())
-            })();
-            if let Some(error) = restore_error {
-                return Err(error);
-            }
-            restored?;
-            eprintln!("isdbs serial route restored and verified");
-            applied
-        })();
-        let release = guard.release();
-        match (result, release) {
-            (Err(error), _) => Err(error),
-            (Ok(_), Err(error)) => Err(error),
-            (Ok(()), Ok(())) => Ok(()),
-        }
-    }
-
-    pub fn with_isdbs_tsset2<F>(capture: F) -> io::Result<()>
-    where
-        F: FnOnce() -> io::Result<()>,
-    {
-        let guard = I2c0Guard::attach_and_take()?;
-        let bus = I2c0::open()?;
-        let result = (|| -> io::Result<()> {
-            let lock = bus.read(0x12, 0x5e, 1)?[0];
-            let ts_enable = bus.read(0x10, 0x0b, 1)?[0];
-            let ts_selector = bus.read(0x10, 0xcc, 1)?[0];
-            let before = bus.read(0x16, 0x06, 1)?[0];
-            if lock & 0x20 == 0 || ts_enable != 1 || ts_selector != 0xc0 || before != 0x40 {
-                return Err(io::Error::other(format!(
-                    "refuse TSSET2 probe: lock={lock:02x} enable={ts_enable:02x} selector={ts_selector:02x} tsset2={before:02x}"
-                )));
-            }
-            bus.write(0x16, 0x06, &[0])?;
-            let applied = (|| -> io::Result<()> {
-                let readback = bus.read(0x16, 0x06, 1)?[0];
-                if readback != 0 {
-                    return Err(io::Error::other(format!("TSSET2 readback {readback:02x}, expected 00")));
-                }
-                capture()
-            })();
-            let restore = bus.write(0x16, 0x06, &[before]);
-            let restored = bus.read(0x16, 0x06, 1)?[0];
-            restore?;
-            if restored != before {
-                return Err(io::Error::other(format!("TSSET2 restore readback {restored:02x}, expected {before:02x}")));
-            }
-            applied
-        })();
-        let release = guard.release();
-        match (result, release) {
-            (Err(e), _) => Err(e),
-            (Ok(_), Err(e)) => Err(e),
-            (Ok(v), Ok(())) => Ok(v),
-        }
+        restore_relative?;
+        restore_window?;
+        verify?;
+        release?;
+        operation
     }
 
     /// Install one of the two documented output-framing states on bank 7.
@@ -1078,52 +861,107 @@ mod arm_linux {
             (Ok(v), Ok(())) => Ok(v),
         }
     }
+    /// Vendor DMD_set_tsout uses reg0b bit0=0 for output flag bit2=1.
+    /// The same flag selects TLV_SPI_8BIT in the S3 branch. Test the
+    /// corresponding MPEG-TS parallel profile; the electrical meaning remains
+    /// inferred from the vendor code rather than a public register map.
+    pub fn experiment_ts_parallel(restore: bool) -> io::Result<()> {
+        let guard = I2c0Guard::attach_and_take()?;
+        let bus = I2c0::open()?;
+        let result = (|| -> io::Result<()> {
+            if bus.read(0x12, 0x5e, 1)?[0] & 0x20 == 0 {
+                return Err(io::Error::other("ISDB-S is not locked"));
+            }
+            let (before, after) = if restore { (0x00, 0x01) } else { (0x01, 0x00) };
+            for (bank, reg, value) in [
+                (0x10,0x0b,before), (0x10,0x13,0x00), (0x10,0x16,0x00),
+                (0x10,0xcc,0x80), (0x17,0x72,0x00),
+            ] {
+                if bus.read(bank,reg,1)?[0] != value {
+                    return Err(io::Error::other("TS parallel profile: unexpected starting register"));
+                }
+            }
+            bus.write(0x10,0x0b,&[after])?;
+            if bus.read(0x10,0x0b,1)?[0] != after {
+                bus.write(0x10,0x0b,&[before])?;
+                return Err(io::Error::other("TS parallel readback mismatch; restored starting byte"));
+            }
+            Ok(())
+        })();
+        let release = guard.release();
+        result.and(release)
+    }
+
+    /// Experimental forwarding of legacy TS into the known 1-bit SPI output
+    /// stage. Values come from regset_TLV_SPI_1BIT; whether bank7:72 selects
+    /// the required forwarding path is the hypothesis, not an established fact.
+    /// No unknown bits, permanent configuration, or unbounded register sweep.
+    pub fn experiment_spi_forward(restore: bool) -> io::Result<()> {
+        let guard = I2c0Guard::attach_and_take()?;
+        let bus = I2c0::open()?;
+        let result = (|| -> io::Result<()> {
+            if bus.read(0x12, 0x5e, 1)?[0] & 0x20 == 0 {
+                return Err(io::Error::other("ISDB-S is not locked"));
+            }
+            let (old16, old72, new16, new72) = if restore {
+                (0x21, 0x02, 0x00, 0x00)
+            } else {
+                (0x00, 0x00, 0x21, 0x02)
+            };
+            for (bank, reg, value) in [
+                (0x10, 0x0b, 0x01), (0x10, 0x13, 0x00),
+                (0x10, 0xcc, 0x80), (0x10, 0x16, old16),
+                (0x17, 0x72, old72), (0x17, 0x7b, 0x67), (0x17, 0x7d, 0x81),
+            ] {
+                let got = bus.read(bank, reg, 1)?[0];
+                if got != value {
+                    return Err(io::Error::other(format!(
+                        "SPI hypothesis refused: bank {bank:#x} reg {reg:#x} is {got:#x}, expected {value:#x}")));
+                }
+            }
+            let writes = [(0x10, 0x16, new16, old16), (0x17, 0x72, new72, old72)];
+            for &(bank, reg, new, _) in &writes {
+                // On a transfer/readback failure, attempt to restore both
+                // already-compared original bytes before releasing the lock.
+                let changed = bus.write(bank, reg, &[new]).and_then(|_| {
+                    if bus.read(bank, reg, 1)?[0] != new {
+                        return Err(io::Error::other("SPI hypothesis readback mismatch"));
+                    }
+                    Ok(())
+                });
+                if let Err(error) = changed {
+                    for &(b, r, _, old) in writes.iter().rev() {
+                        if let Err(rollback) = bus.write(b, r, &[old]) {
+                            eprintln!("SPI rollback failed: {rollback}");
+                        }
+                    }
+                    return Err(error);
+                }
+            }
+            Ok(())
+        })();
+        let release = guard.release();
+        result.and(release)
+    }
+
 }
 
 #[cfg(all(target_os = "linux", target_arch = "arm"))]
 pub use arm_linux::{
-    make_isdbs_ts_output_exclusive, quiesce_ts_output, read_isdbs_status, read_isdbs_tmcc_tsids, read_output_regs,
+    make_isdbs_ts_output_exclusive, quiesce_ts_output, read_isdbs_status, read_output_regs,
     select_tlv_output_exclusive, set_tsout_framing, set_tsout_interface, snapshot_watchlist,
-    standby_isdbt, tune, probe_hiz, probe_doset,
-    with_isdbs_serial_route, with_isdbs_tsset2,
+    standby_isdbt, tune, experiment_spi_forward, experiment_ts_parallel,
+    read_isdbs_tmcc, select_isdbs_relative_zero,
 };
 
 #[cfg(not(all(target_os = "linux", target_arch = "arm")))]
-pub fn with_isdbs_serial_route<F>(_capture: F, _vendor_base: bool) -> std::io::Result<()>
-where
-    F: FnOnce() -> std::io::Result<()>,
-{
-    Err(std::io::Error::new(
-        std::io::ErrorKind::Unsupported,
-        "SC1501A serial-route probe is available only in the ARM device build",
-    ))
+pub fn select_isdbs_relative_zero(_restore: bool) -> std::io::Result<IsdbsTsExclusiveResult> {
+    Err(std::io::Error::other("relative-TS0 diagnostic requires the ARM device build"))
 }
 
 #[cfg(not(all(target_os = "linux", target_arch = "arm")))]
-pub fn with_isdbs_tsset2<F>(_capture: F) -> std::io::Result<()>
-where
-    F: FnOnce() -> std::io::Result<()>,
-{
-    Err(std::io::Error::new(
-        std::io::ErrorKind::Unsupported,
-        "SC1501A TSSET2 probe is available only in the ARM device build",
-    ))
-}
-
-#[cfg(not(all(target_os = "linux", target_arch = "arm")))]
-pub fn probe_doset(_route_a: bool, _doset_t_enabled: bool) -> std::io::Result<DosetProbeResult> {
-    Err(std::io::Error::new(
-        std::io::ErrorKind::Unsupported,
-        "SC1501A DOSET1_S probe is available only in the ARM device build",
-    ))
-}
-
-#[cfg(not(all(target_os = "linux", target_arch = "arm")))]
-pub fn probe_hiz(_route_a: bool) -> std::io::Result<HizProbeResult> {
-    Err(std::io::Error::new(
-        std::io::ErrorKind::Unsupported,
-        "SC1501A HIZ probe is available only in the ARM device build",
-    ))
+pub fn read_isdbs_tmcc() -> std::io::Result<IsdbsTmcc> {
+    Err(std::io::Error::other("TMCC monitor requires the ARM device build"))
 }
 
 #[cfg(not(all(target_os = "linux", target_arch = "arm")))]
@@ -1191,14 +1029,6 @@ pub fn read_isdbs_status() -> std::io::Result<IsdbsStatus> {
 }
 
 #[cfg(not(all(target_os = "linux", target_arch = "arm")))]
-pub fn read_isdbs_tmcc_tsids() -> std::io::Result<IsdbsTmccTsids> {
-    Err(std::io::Error::new(
-        std::io::ErrorKind::Unsupported,
-        "ISDB-S TMCC read is available only in the ARM device build",
-    ))
-}
-
-#[cfg(not(all(target_os = "linux", target_arch = "arm")))]
 pub fn make_isdbs_ts_output_exclusive() -> std::io::Result<IsdbsTsExclusiveResult> {
     Err(std::io::Error::new(
         std::io::ErrorKind::Unsupported,
@@ -1216,6 +1046,19 @@ pub fn standby_isdbt() -> std::io::Result<()> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn tmcc_tsid_fields_extract_all_eight_unaligned_msb_first_values() {
+        let expected = [0x4010u16, 0x4011, 0x4012, 0xffff, 0, 1, 0x8000, 0xabcd];
+        let mut bytes = [0u8; 40];
+        // Fixed packed vector: 189 leading zero bits, eight big-endian
+        // identifiers, three trailing zero bits. Do not reuse the extractor
+        // indexing formula to manufacture this fixture.
+        bytes[23..].copy_from_slice(&[
+            0x02, 0x00, 0x82, 0x00, 0x8a, 0x00, 0x97, 0xff, 0xf8,
+            0x00, 0x00, 0x00, 0x0c, 0x00, 0x05, 0x5e, 0x68,
+        ]);
+        assert_eq!(super::tmcc_tsid_fields(&bytes), expected);
+    }
     use super::*;
 
     #[test]
@@ -1334,4 +1177,14 @@ mod tests {
             assert_eq!(classify_tsout(&sample), TsoutFraming::Other);
         }
     }
+}
+
+#[cfg(not(all(target_os = "linux", target_arch = "arm")))]
+pub fn experiment_spi_forward(_restore: bool) -> std::io::Result<()> {
+    Err(std::io::Error::other("SPI experiment is ARM-only"))
+}
+
+#[cfg(not(all(target_os = "linux", target_arch = "arm")))]
+pub fn experiment_ts_parallel(_restore: bool) -> std::io::Result<()> {
+    Err(std::io::Error::new(std::io::ErrorKind::Unsupported, "ARM device only"))
 }

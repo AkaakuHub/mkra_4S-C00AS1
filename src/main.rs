@@ -13,23 +13,29 @@
 //!   dmd-tsout-base / dmd-tsout-tlv  switch bank7 73/75/7b/7d between the two
 //!            product-defined states (guarded, compare-before-write, read back)
 //!   tsi-mmr  read the live XCode6 TSI MMR/status without changing its state
-//!   fw-state  read the driver's firmware heartbeat tracker without changing it
 //!
 //! Read docs/ABI.md before
 //! changing behaviour on the device.
 
 mod api;
+mod bs2k;
+mod cas;
+mod descramble;
+#[path = "../tools/multi2.rs"]
+mod multi2;
+mod native_selection;
 mod channels;
 mod cpld;
 mod findbuf;
 mod fw_state;
+mod latm;
 mod graph;
 mod gr;
 mod gr_i2c;
+mod loopback;
 mod http;
 mod i2c_lock;
 mod json;
-mod latm;
 mod remux4k;
 mod si;
 mod snapshot;
@@ -44,7 +50,7 @@ mod xcdrv;
 // platform entropy source, and this binary targets a 2012-era 3.10 kernel
 // that predates `getrandom(2)`. Ten channels make ordering free anyway.
 use std::collections::BTreeMap;
-use std::io::{self, Read, Seek, SeekFrom, Write};
+use std::io::{self, Write};
 use std::net::TcpListener;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::Arc;
@@ -85,43 +91,29 @@ mkra — Mirakurun-compatible relay for the SHARP 4S-C00AS1
 
 USAGE:
   mkra serve [options]
-  mkra latm2adts --file <in.ts> --out <out.ts>
   mkra probe [options]
   mkra dump  --buffer <handle> --out <path> [--seconds <n>] [--reader <handle>|--passive]
   mkra graph [--watch <n>] [--sniff]
-  mkra graph-status
-  mkra fw-state
-  mkra fw-queue
-  mkra fw-p4-queue
   mkra peek  --phys <addr> [--len <n>]
   mkra tune  --freq <kHz> [--tsid <hex>] [--tuner-no <1..3>] [--input-port <n>]
   mkra tune  --fed <adbs|isdb-s> --freq <kHz> [--path <n>] [--tsid <hex>] [--dry-run]
   mkra fed-off --path <1..4> --dev <0x2|0x4|0x8> [--dry-run]
   mkra fem-dev --path <1..6> (--dev <hex> | --disconnect) [--dry-run]
   mkra cpld --reg <0..4> [--set <hex> --expect <hex>]
-  mkra tsrec --out <path> [--seconds <n>] [--tsi-port <n>] [--tsi-preserve-config]
-  mkra demux --out <path|-> [--seconds <n>] [--tsi-port <n>] [--tsi-logical-port <0|1>] [--tsi-explicit-route] [--tsi-crossbar-source <1>] [--tsi-packet <188|192|204|130>] [--tsi-use-sync] [--tsi-parallel] [--tsi-positive-edge] [--tsi-preserve-config]
-             [--pid <0..8191>|--pat-section] [--run-after-filter] [--dry-run]
+  mkra tsrec --out <path> [--seconds <n>] [--tsi-port <n>]
+  mkra demux --out <path> [--seconds <n>] [--tsi-port <n>] [--tsi-packet <188|192|204|130>] [--tsi-use-sync]
+             [--pid <0..8191>|--pat-section] [--dry-run]
   mkra remux4k --out <path> [--seconds <n>] [--tsid <hex>] [--dry-run]
   mkra tune4k  --sid <101|102|141|151|161|171|181|211|221|231> [--oid <n>] [--dry-run]
   mkra gr (--channel <13..62>|--freq <kHz>) [--if-hz <Hz>] [--dry-run]
   mkra gr-off
   mkra isdbs-status
-  mkra tsi-crossbar-restore
-  mkra tsi-edge-restore
-  mkra tsi-edge-status-probe
-  mkra tsi1-baseline-signal-probe
-  mkra isdbs-tmcc-tsids
   mkra isdbs-ts-exclusive
+  mkra demux-crossbar    bounded logical1 -> physical0 BS-1 diagnostic
+  mkra demux-loopback | local-demux-loopback  synthetic diagnostic; no RF/TSI writes
   mkra dmd-regs
-  mkra dmd-hiz-probe
-  mkra dmd-doset-probe
-  mkra dmd-doset-route-probe
-  mkra dmd-doset-t-route-probe
-  mkra dmd-serial-route-probe --out <path> --seconds <1..8> --tsi-port <0|1> [--tsi-logical-port <0|1>]
-  mkra dmd-serial-base-route-probe --out <path> --seconds <1..8> --tsi-port <0|1> [--tsi-logical-port <0|1>]
-  mkra dmd-tsset2-probe --out <path> --seconds <1..8> --tsi-port <0|1> [--tsi-logical-port <0|1>]
-  mkra dmd-tsa-probe
+  mkra dmd-tmcc           read received ISDB-S monitors; restore selectors
+  mkra dmd-relative0 | dmd-tsid-restore  guarded BS-1 selection comparison
   mkra dmd-tsout-base | dmd-tsout-tlv
   mkra dmd-iface-serial | dmd-iface-isdbs | dmd-quiesce
   mkra dmd-mode16-serial | dmd-mode16-isdbs
@@ -134,6 +126,8 @@ USAGE:
 SERVE OPTIONS:
   --port <n>            listen port                    (default 40772)
   --bind <addr>         bind address                   (default 0.0.0.0)
+  --isdbs-channels <path> optional BS/CS TSV (requires --bs2k)
+  --bs2k               integrate live BS-1/TSID4010 + CAS (requires --remux4k --tune)
   --remux4k             stream live BS4K by building our own REMUX on the
                         product's MMT ES rings (see REMUX4K OPTIONS)
   --buffer <handle>     driver buffer handle to read   (decimal or 0x hex)
@@ -202,7 +196,7 @@ GRAPH OPTIONS (all read-only: /dev/kmem + xc_map, no buffer ioctl):
 
 TSI-MMR (read-only):
   Reads the fixed XCode6 TSI enable/status/config/CRC/crossbar MMR words and
-  issues status ioctl 0x51 for physical TSI0 through TSI7. It performs no config,
+  issues status ioctl 0x51 for physical TSI0 and TSI1. It performs no config,
   graph, buffer, tune, I2C, SPI, or firmware write.
 
 ISDBS-TS-EXCLUSIVE (one fixed I2C write):
@@ -234,6 +228,10 @@ REMUX4K OPTIONS (BS4K MMT -> MPEG-TS, no recording required):
   --tsid <hex>          transport_stream_id for the generated PAT (default 4000)
   --discover-only       read-only: report the live ES rings and pipeline, then
                         stop before creating anything
+  --allow-no-decoder    diagnostic CLI: permit absent native decoder readers
+                        only when the same video/audio ES rings advance
+  --sid <n>             explicit 4K service identity when the SI cache is stale;
+                        sets PAT/PMT identity without changing channel
   --raw-stream          write the REMUX output verbatim instead of unwrapping
                         it, for establishing the container framing
   --inject-psi          add a locally generated PAT/PMT (off by default: the
@@ -249,9 +247,6 @@ REMUX4K OPTIONS (BS4K MMT -> MPEG-TS, no recording required):
                         to this level (default 48; steady state is 9..14). This
                         is the guard that matters: a stalled tap starves the
                         product's decoder and blocks its own recovery.
-  --audio-latm          keep the AAC audio as LATM (stream_type 0x11). By default
-                        it is rewritten to ADTS (0x0F) without re-encoding,
-                        because TVTest only decodes ADTS.
   --dry-run             print every ioctl request and touch nothing
 
   Builds a private REMUX (me_type 0x0E) exactly as adsb's recording path does,
@@ -272,6 +267,8 @@ TUNE OPTIONS:
                         sequence is used (advanced BS only).
                           adbs    = the 4K frontend, Q_FED_ADBS1
                           isdb-s  = BS/CS110 HD, needs --path
+                          isdb-s-fem = experimental BS/CS110 via FEM msg0x200d;
+                                       assign the ISDB-S FEM device first
                         Each frontend encodes the frequency differently; mkra
                         converts, so always pass the RF value.
   --path <1..4>         which non-4K frontend (Q_FED1..4). Travels in the wire
@@ -308,7 +305,9 @@ DEMUX OPTIONS:
   --seconds <n>         capture duration (default 3)
   --tsi-port <n>        physical XCode6 TSI port (default 1 for demux/BS;
                         pass 0 explicitly for GR; BS system=2 maps to TSI1)
-  --tsi-parallel        configure the physical TSI for parallel input
+  --tsi-parallel        use parallel input (default serial)
+  --tsi-rising-edge     sample on rising clock edge (default falling)
+  --tsi-valid-low       active-low VALID (default active-high)
   --pid <0..8191>       diagnostic single-PID output; default is PID=-1 full TS
   --no-filter           Gate 5A: create/run DEMUX and SYSTEM/TS ring without
                         adding a PID filter; mutually exclusive with --pid
@@ -344,11 +343,6 @@ GR OPTIONS:
   or sem_init), issue the one fixed sequence, and report RF latch/ISDB-T lock.
   Live GR changes RF state; reboot before the next live hypothesis.
 
-LATM2ADTS:
-  Offline, runs anywhere: rewrite a recorded TS's LATM audio to ADTS the same
-  way `serve` does live (no re-encode). For recordings made with --audio-latm
-  or by an older mkra that TVTest plays without sound.
-
 COMMON:
   --dev-node <path>     driver node (default /dev/vixs/xcodedrv)
   -h, --help            this text
@@ -373,62 +367,62 @@ fn main() {
         "serve" => cmd_serve(&opts),
         "probe" => cmd_probe(&opts),
         "dump" => cmd_dump(&opts),
+        "latm2adts" => cmd_latm2adts(&opts),
+        "fw-queue" => match fw_state::print_queue() { Ok(()) => 0, Err(e) => { eprintln!("{e}"); 1 } },
+        "fw-p4-queue" => match fw_state::print_p4_queue() { Ok(()) => 0, Err(e) => { eprintln!("{e}"); 1 } },
+        "fw-state" => match fw_state::print() { Ok(()) => 0, Err(e) => { eprintln!("{e}"); 1 } },
         "graph" => cmd_graph(&opts),
-        "graph-status" => cmd_graph_status(&opts),
-        "fw-state" => match fw_state::print() {
-            Ok(()) => 0,
-            Err(e) => {
-                eprintln!("mkra: firmware status: {e}");
-                1
-            }
-        },
-        "fw-queue" => match fw_state::print_queue() {
-            Ok(()) => 0,
-            Err(e) => {
-                eprintln!("mkra: firmware queue: {e}");
-                1
-            }
-        },
-        "fw-p4-queue" => match fw_state::print_p4_queue() {
-            Ok(()) => 0,
-            Err(e) => {
-                eprintln!("mkra: P4 queue: {e}");
-                1
-            }
-        },
         "peek" => cmd_peek(&opts),
         "tune" => cmd_tune(&opts),
         "fed-off" => cmd_fed_off(&opts),
         "fem-dev" => cmd_fem_dev(&opts),
         "cpld" => cmd_cpld(&opts),
         "tsrec" => cmd_tsrec(&opts),
-        "demux" => cmd_demux(&opts),
+        "demux" | "demux-crossbar" => cmd_demux(&opts),
+        "demux-loopback" => loopback::run(loopback::Case::Tsi),
+        "local-demux-loopback" => loopback::run(loopback::Case::LocalSmall),
+        "local-demux-bulk-loopback" => loopback::run(loopback::Case::LocalBulk),
+        "local-demux-file-loopback" => loopback::run(loopback::Case::LocalFile),
+        "local-demux-tts-loopback" => loopback::run(loopback::Case::LocalTts),
+        "local-demux-pat-loopback" => loopback::run(loopback::Case::LocalPat),
+        "local-demux-started-loopback" => loopback::run(loopback::Case::LocalStarted),
+        "local-demux-tts-started-loopback" => loopback::run(loopback::Case::LocalTtsStarted),
+        "local-demux-described-loopback" => loopback::run(loopback::Case::LocalDescribed),
+        "local-demux-tts-described-loopback" => loopback::run(loopback::Case::LocalTtsDescribed),
+        "local-demux-pat-described-loopback" => loopback::run(loopback::Case::LocalPatDescribed),
         "remux4k" => cmd_remux4k(&opts),
-        "latm2adts" => cmd_latm2adts(&opts),
         "tune4k" => cmd_tune4k(&opts),
         "gr" => cmd_gr(&opts),
         "gr-off" => cmd_gr_off(),
         "isdbs-status" => cmd_isdbs_status(),
-        "tsi-crossbar-restore" => cmd_tsi_crossbar_restore(),
-        "tsi-edge-restore" => cmd_tsi_edge_restore(),
-        "tsi-edge-status-probe" => cmd_tsi_edge_status_probe(),
-        "tsi1-baseline-signal-probe" => cmd_tsi1_baseline_signal_probe(),
-        "isdbs-tmcc-tsids" => cmd_isdbs_tmcc_tsids(),
         "dmd-regs" => cmd_dmd_regs(),
-        "dmd-hiz-probe" => cmd_dmd_hiz_probe(false),
-        "dmd-doset-probe" => cmd_dmd_doset_probe(false, false),
-        "dmd-doset-route-probe" => cmd_dmd_doset_probe(true, false),
-        "dmd-doset-t-route-probe" => cmd_dmd_doset_probe(true, true),
-        "dmd-serial-route-probe" => cmd_dmd_output_probe(&opts, false, false),
-        "dmd-serial-base-route-probe" => cmd_dmd_output_probe(&opts, false, true),
-        "dmd-tsset2-probe" => cmd_dmd_output_probe(&opts, true, false),
-        "dmd-tsa-probe" => cmd_dmd_hiz_probe(true),
+        "dmd-tmcc" => cmd_dmd_tmcc(),
+        "dmd-relative0" | "dmd-tsid-restore" => {
+            match gr_i2c::select_isdbs_relative_zero(opts.command == "dmd-tsid-restore") {
+                Ok(r) => { println!("ISDB-S reg31 {:02x} -> {:02x}, verified; TSID 4010 unchanged", r.before, r.after); 0 }
+                Err(e) => { eprintln!("relative-TS0 selection refused/failed: {e}"); 1 }
+            }
+        },
         "dmd-tsout-base" => cmd_dmd_tsout(gr_i2c::TsoutTarget::Base),
         "dmd-tsout-tlv" => cmd_dmd_tsout(gr_i2c::TsoutTarget::TlvSpi1Bit),
         "dmd-iface-serial" => cmd_dmd_iface(gr_i2c::TsoutInterface::Serial1Bit),
         "dmd-iface-isdbs" => cmd_dmd_iface(gr_i2c::TsoutInterface::IsdbsDefault),
         "dmd-mode16-serial" => cmd_dmd_iface(gr_i2c::TsoutInterface::Mode16Serial),
         "dmd-mode16-isdbs" => cmd_dmd_iface(gr_i2c::TsoutInterface::Mode16Isdbs),
+        "dmd-mode16-tsserial" => cmd_dmd_iface(gr_i2c::TsoutInterface::TsSerial20),
+        "dmd-mode16-tsdefault" => cmd_dmd_iface(gr_i2c::TsoutInterface::TsSerial20Restore),
+        "dmd-ts-parallel" | "dmd-ts-serial-restore" => {
+            match gr_i2c::experiment_ts_parallel(opts.command == "dmd-ts-serial-restore") {
+                Ok(()) => { println!("TS reg0b parallel/serial profile applied and verified"); 0 }
+                Err(e) => { eprintln!("mkra: TS parallel experiment refused/failed: {e}"); 1 }
+            }
+        }
+        "dmd-spi-forward" | "dmd-spi-restore" => {
+            match gr_i2c::experiment_spi_forward(opts.command == "dmd-spi-restore") {
+                Ok(()) => { println!("Guarded SPI forwarding hypothesis applied/read back"); 0 },
+                Err(e) => { eprintln!("SPI forwarding hypothesis refused/failed: {e}"); 1 },
+            }
+        },
         "dmd-quiesce" => cmd_dmd_quiesce(),
         "sc1501a-snapshot" => cmd_sc1501a_snapshot(&opts),
         "dmd-cc-select40" => cmd_dmd_cc_select40(),
@@ -467,25 +461,6 @@ fn cmd_isdbs_status() -> i32 {
     }
 }
 
-fn cmd_isdbs_tmcc_tsids() -> i32 {
-    match gr_i2c::read_isdbs_tmcc_tsids() {
-        Ok(result) => {
-            println!(
-                "ISDB-S lock before={:02x} after={:02x}; requested TSID={:04x}",
-                result.lock_before, result.lock_after, result.requested
-            );
-            for (index, tsid) in result.tsids.iter().enumerate() {
-                println!("TMCC TSID[{index}]={tsid:04x}");
-            }
-            0
-        }
-        Err(e) => {
-            eprintln!("mkra: ISDB-S TMCC TSID read failed: {e}");
-            1
-        }
-    }
-}
-
 /// Read-only snapshot of the SC1501A registers that decide serial output
 /// framing.  Nothing here writes; the command exists to test one static claim:
 /// after a 4K (ISDB-S3/TLV) session, bank 7 `0x73/0x75/0x7b/0x7d` still hold
@@ -504,22 +479,21 @@ fn cmd_dmd_regs() -> i32 {
         regs.lock,
         if regs.lock & 0x20 != 0 { "LOCK" } else { "UNLOCK" }
     );
-    println!(
-        "ISDB-S requested TSID 2f/30={:04x} TSSET 31={:02x}",
-        regs.isdbs_tsid, regs.isdbs_tsset
-    );
     print!("bank0 (i2c 0x10):");
     for (reg, value) in regs.bank0 {
         print!(" {reg:02x}={value:02x}");
     }
     println!();
+    let [tsid_hi, tsid_lo, select] = regs.bank2_selection;
+    println!("bank2 ISDB-S selection controls: 2f={tsid_hi:02x} 30={tsid_lo:02x} 31={select:02x}");
+    if select & 0x08 == 0 {
+        println!("ISDB-S requested TSID readback: {:#06x} (TSID selection mode; not received SI)",
+                 u16::from_be_bytes([tsid_hi, tsid_lo]));
+    } else {
+        println!("ISDB-S relative TS selection mode: {} (not received SI)", select & 7);
+    }
     print!("bank7 (i2c 0x17):");
     for (reg, value) in regs.bank7 {
-        print!(" {reg:02x}={value:02x}");
-    }
-    println!();
-    print!("isdbt page (i2c 0x16):");
-    for (reg, value) in regs.isdbt_page {
         print!(" {reg:02x}={value:02x}");
     }
     println!();
@@ -538,93 +512,23 @@ fn cmd_dmd_regs() -> i32 {
     0
 }
 
-fn cmd_dmd_hiz_probe(route_a: bool) -> i32 {
-    match gr_i2c::probe_hiz(route_a) {
-        Ok(result) => {
-            println!("XCode6 physical TSI1 configured for 188-byte MPEG-TS during probe");
-            println!(
-                "SC1501A HIZSET1/2 active readback: {:02x}/{:02x}",
-                result.active_readback.0, result.active_readback.1
-            );
-            for (stage, (lock, crc)) in [
-                ("before", result.before),
-                ("enabled", result.enabled),
-                ("restored", result.restored),
-            ] {
-                println!("TSI1 {stage}: lock={} crc=0x{crc:02x}", u8::from(lock));
-            }
-            println!("SC1501A HIZSET1/2 restored to ff/ff");
-            if route_a {
-                println!("SC1501A TS A/B selectors restored to 00/00");
-            }
-            0
-        }
-        Err(e) => {
-            eprintln!("mkra: HIZ probe failed: {e}");
-            1
-        }
-    }
-}
-
-fn cmd_dmd_doset_probe(route_a: bool, doset_t_enabled: bool) -> i32 {
-    match gr_i2c::probe_doset(route_a, doset_t_enabled) {
-        Ok(result) => {
-            println!("SC1501A DOSET1_S active readback: {:02x}", result.active_readback);
-            for (stage, statuses) in [
-                ("before", result.before),
-                ("enabled", result.enabled),
-                ("restored", result.restored),
-            ] {
-                for (port, (lock, crc)) in statuses.into_iter().enumerate() {
-                    println!("TSI{port} {stage}: lock={} crc=0x{crc:02x}", u8::from(lock));
-                }
-            }
-            println!("SC1501A DOSET1_S restored to 00");
-            if route_a {
-                println!("SC1501A output-A, HIZ, and 1-bit interface restored");
-            }
-            if doset_t_enabled {
-                println!("SC1501A DOSET1_T restored to ff");
-            }
-            0
-        }
-        Err(e) => {
-            eprintln!("mkra: DOSET1_S probe failed: {e}");
-            1
-        }
-    }
-}
-
-fn cmd_dmd_output_probe(opts: &Options, tsset2_only: bool, vendor_base: bool) -> i32 {
-    if opts.out.is_none()
-        || opts.tsi_port > 1
-        || opts.demux_no_filter
-        || !opts.pids.is_empty()
-        || opts.demux_pat_section
-        || !(1..=8).contains(&opts.seconds)
-    {
-        eprintln!("mkra: output probe requires --out, an allowed TSI port, full TS filter and --seconds 1..8");
-        return 2;
-    }
-    let capture = || {
-        if cmd_demux(opts) == 0 {
-            Ok(())
-        } else {
-            Err(io::Error::other("DEMUX capture failed"))
-        }
+fn cmd_dmd_tmcc() -> i32 {
+    let sample = match gr_i2c::read_isdbs_tmcc() {
+        Ok(sample) => sample,
+        Err(e) => { eprintln!("mkra: TMCC monitor failed: {e}"); return 1; }
     };
-    let result = if tsset2_only {
-        gr_i2c::with_isdbs_tsset2(capture)
-    } else {
-        gr_i2c::with_isdbs_serial_route(capture, vendor_base)
-    };
-    match result {
-        Ok(()) => 0,
-        Err(error) => {
-            eprintln!("mkra: output probe failed: {error}");
-            1
-        }
+    println!("tmcc.lock.before={:02x}\ntmcc.lock.after={:02x}", sample.locks[0], sample.locks[1]);
+    println!("tmcc.selectors.restored=62:{:02x},65:{:02x}", sample.selectors[0], sample.selectors[1]);
+    for (i, value) in sample.indexed_tsids.iter().enumerate() {
+        println!("tmcc.indexed_tsid[{i}]={value:04x}");
     }
+    for (i, value) in gr_i2c::tmcc_tsid_fields(&sample.raw).iter().enumerate() {
+        println!("tmcc.info[{}]={value:04x}", 59 + i);
+    }
+    print!("tmcc.raw=");
+    for byte in sample.raw { print!("{byte:02x}"); }
+    println!("\nMonitor selectors were restored; no selection/output registers were changed.");
+    0
 }
 
 /// Install one of the two product-defined SC1501A output-framing states on
@@ -667,6 +571,8 @@ fn cmd_dmd_iface(target: gr_i2c::TsoutInterface) -> i32 {
         gr_i2c::TsoutInterface::IsdbsDefault => "regset_ISDBS defaults (rollback)",
         gr_i2c::TsoutInterface::Mode16Serial => "0x16 only -> 0x21",
         gr_i2c::TsoutInterface::Mode16Isdbs => "0x16 only -> 0x00 (rollback)",
+        gr_i2c::TsoutInterface::TsSerial20 => "experimental TS serial: 0x16 -> 0x20",
+        gr_i2c::TsoutInterface::TsSerial20Restore => "experimental TS serial rollback: 0x16 -> 0x00",
     };
     match gr_i2c::set_tsout_interface(target) {
         Ok(result) => {
@@ -740,13 +646,14 @@ fn cmd_sc1501a_snapshot(opts: &Options) -> i32 {
     match snapshot::procmem::find_pid("tuner") {
         Ok(pid) => {
             println!("tuner.pid={pid}");
-            if let Err(e) = snapshot::verify_tuner_binary(pid) {
-                eprintln!("mkra: refusing tuner memory inspection: {e}");
+            if let Err(e) = snapshot::procmem::verify_layout(pid) {
+                eprintln!("tuner.layout=ERR:{e}");
                 return 1;
             }
+            println!("tuner.layout=build-id:c1eb0b76d320099c843b7a987a89dbb71e08d282");
             match snapshot::procmem::maps(pid) {
                 Ok(maps) => {
-                    for addr in [snapshot::ISDBS_INIT_FLAG, snapshot::RECOMMEND_FLAGS, snapshot::PSEQ_FLAGS, snapshot::CONTEXT_BASE] {
+                    for addr in [snapshot::RECOMMEND_FLAGS, snapshot::PSEQ_FLAGS, snapshot::CONTEXT_BASE] {
                         println!(
                             "tuner.map.{addr:06x}.writable={}",
                             u8::from(snapshot::procmem::is_writable(&maps, addr))
@@ -764,7 +671,6 @@ fn cmd_sc1501a_snapshot(opts: &Options) -> i32 {
                     Err(e) => format!("ERR:{e}"),
                 }
             };
-            println!("tuner.isdbs_init_flag={}", word(snapshot::ISDBS_INIT_FLAG));
             for i in 0..4u32 {
                 println!("tuner.recommend_flag[{i}]={}", word(snapshot::RECOMMEND_FLAGS + i * 4));
                 println!("tuner.pseq_flag[{i}]={}", word(snapshot::PSEQ_FLAGS + i * 4));
@@ -890,6 +796,8 @@ struct Options {
     file_repeat: bool,
     channels: Option<String>,
     channel_type: String,
+    bs2k: bool,
+    isdbs_channels: Option<String>,
     test_pattern: bool,
     test_bitrate: u64,
     ring: usize,
@@ -917,6 +825,7 @@ struct Options {
     tsid: u16,
     passive: bool,
     raw_stream: bool,
+    remux4k_latm: bool,
     epg_dir: Option<String>,
     epg_refresh_secs: u64,
     epg_tap: bool,
@@ -930,13 +839,11 @@ struct Options {
     demux_observe_resources: bool,
     demux_observe_sf_ring: bool,
     demux_observe_tsi_route: bool,
-    demux_run_after_filter: bool,
     demux_ready_before_filter: bool,
-    demux_explicit_route: bool,
-    demux_crossbar_source: Option<u32>,
-    demux_logical_port: u32,
     /// remux4k: run only the read-only discovery step and print what it found.
     remux4k_discover_only: bool,
+    /// Diagnostic CLI only; verify fresh ES writes before bypassing the decoder guard.
+    remux4k_allow_no_decoder: bool,
     /// remux4k: also inject a locally generated PAT/PMT into the output.
     remux4k_inject_psi: bool,
     /// remux4k: re-run the device whenever a whole second passes with no data.
@@ -947,8 +854,6 @@ struct Options {
     remux4k_es_level_abort: u32,
     /// remux4k: skip the TSINFO side channel entirely.
     remux4k_no_tsinfo: bool,
-    /// remux4k: keep the audio as LATM instead of rewriting it to ADTS.
-    remux4k_latm: bool,
     /// serve: use the BS4K REMUX tap as the TS backend.
     remux4k_backend: bool,
     /// tune4k: advanced-BS service id to select.
@@ -975,9 +880,9 @@ struct Options {
     tsi_packet: u32,
     /// `m_use_sync_bit`, word 4 of the physical TSI request. Gate 5E2-SYNC.
     tsi_use_sync: bool,
+    tsi_rising_edge: bool,
+    tsi_valid_low: bool,
     tsi_parallel: bool,
-    tsi_positive_edge: bool,
-    tsi_preserve_config: bool,
     channel: Option<u8>,
     if_hz: u32,
 }
@@ -988,9 +893,9 @@ impl Options {
             label: None,
             tsi_packet: xcdrv::ME_PACKET_188,
             tsi_use_sync: false,
+            tsi_rising_edge: false,
+            tsi_valid_low: false,
             tsi_parallel: false,
-            tsi_positive_edge: false,
-            tsi_preserve_config: false,
             command: args[0].clone(),
             port: 40772,
             bind: "0.0.0.0".into(),
@@ -1001,6 +906,8 @@ impl Options {
             file_repeat: false,
             channels: None,
             channel_type: channels::DEFAULT_CHANNEL_TYPE.to_string(),
+            bs2k: false,
+            isdbs_channels: None,
             test_pattern: false,
             test_bitrate: 8_000_000,
             ring: 2 * 1024 * 1024,
@@ -1028,6 +935,7 @@ impl Options {
             tsid: 0xFFFF,
             passive: false,
             raw_stream: false,
+            remux4k_latm: false,
             epg_dir: None,
             epg_refresh_secs: 300,
             epg_tap: false,
@@ -1041,18 +949,14 @@ impl Options {
             demux_observe_resources: false,
             demux_observe_sf_ring: false,
             demux_observe_tsi_route: false,
-            demux_run_after_filter: false,
             demux_ready_before_filter: false,
-            demux_explicit_route: false,
-            demux_crossbar_source: None,
-            demux_logical_port: 0,
             remux4k_discover_only: false,
+            remux4k_allow_no_decoder: false,
             remux4k_inject_psi: false,
             remux4k_kick: false,
             remux4k_stall_abort_ms: 5000,
             remux4k_es_level_abort: 48,
             remux4k_no_tsinfo: true,
-            remux4k_latm: false,
             remux4k_backend: false,
             sid: None,
             oid: 32,
@@ -1115,19 +1019,15 @@ impl Options {
                 "--observe-resources" => o.demux_observe_resources = true,
                 "--observe-sf-ring" => o.demux_observe_sf_ring = true,
                 "--observe-tsi-route" => o.demux_observe_tsi_route = true,
-                "--run-after-filter" => o.demux_run_after_filter = true,
                 "--ready-before-filter" => o.demux_ready_before_filter = true,
-                "--tsi-explicit-route" => o.demux_explicit_route = true,
-                "--tsi-crossbar-source" => o.demux_crossbar_source = Some(parse_u32(&value()?, a)?),
-                "--tsi-logical-port" => o.demux_logical_port = parse_u32(&value()?, a)?,
                 "--discover-only" => o.remux4k_discover_only = true,
+                "--allow-no-decoder" => o.remux4k_allow_no_decoder = true,
                 "--inject-psi" => o.remux4k_inject_psi = true,
                 "--kick" => o.remux4k_kick = true,
                 "--stall-abort-ms" => o.remux4k_stall_abort_ms = parse_num(&value()?, a)?,
                 "--es-level-abort" => o.remux4k_es_level_abort = parse_num(&value()?, a)? as u32,
                 "--no-tsinfo" => o.remux4k_no_tsinfo = true,
                 "--with-tsinfo" => o.remux4k_no_tsinfo = false,
-                "--audio-latm" => o.remux4k_latm = true,
                 "--remux4k" => o.remux4k_backend = true,
                 "--sid" => o.sid = Some(parse_num(&value()?, a)? as u16),
                 "--oid" => o.oid = parse_num(&value()?, a)? as u32,
@@ -1138,6 +1038,8 @@ impl Options {
                 "--park-tsid" => o.park_tsid = u16::from_str_radix(value()?.trim_start_matches("0x"), 16).map_err(|e| format!("--park-tsid: {e}"))?,
                 "--epg-refresh" => o.epg_refresh_secs = parse_num(&value()?, a)? as u64,
                 "--channel-type" => o.channel_type = value()?,
+                "--bs2k" => o.bs2k = true,
+                "--isdbs-channels" => o.isdbs_channels=Some(value()?),
                 "--test-pattern" => o.test_pattern = true,
                 "--test-bitrate" => o.test_bitrate = parse_num(&value()?, a)?,
                 "--ring" => o.ring = parse_num(&value()?, a)? as usize,
@@ -1168,9 +1070,9 @@ impl Options {
                 "--pid" => o.pids.push(parse_num(&value()?, a)? as u32),
                 "--label" => o.label = Some(value()?),
                 "--tsi-use-sync" => o.tsi_use_sync = true,
+                "--tsi-rising-edge" => o.tsi_rising_edge = true,
+                "--tsi-valid-low" => o.tsi_valid_low = true,
                 "--tsi-parallel" => o.tsi_parallel = true,
-                "--tsi-positive-edge" => o.tsi_positive_edge = true,
-                "--tsi-preserve-config" => o.tsi_preserve_config = true,
                 "--tsi-packet" => {
                     o.tsi_packet = match value()?.as_str() {
                         "188" => xcdrv::ME_PACKET_188,
@@ -1194,10 +1096,14 @@ impl Options {
                         .map_err(|_| format!("--tsid: `{v}` is not hex"))?;
                 }
                 "--passive" => o.passive = true,
+                "--audio-latm" => o.remux4k_latm = true,
                 "--raw-stream" => o.raw_stream = true,
                 other => return Err(format!("unknown option `{other}`")),
             }
             i += 1;
+        }
+        if o.remux4k_allow_no_decoder && o.command != "remux4k" {
+            return Err("--allow-no-decoder is only supported by remux4k".into());
         }
         // The priority path is BS/CS 2K, whose product system=2 setup maps
         // to physical TSI1. GR uses system=0/TSI0 and must opt in explicitly
@@ -1336,6 +1242,7 @@ fn scrape_section_rings(reader: &graph::ObjReader) -> std::io::Result<Vec<Vec<u8
 }
 
 fn cmd_serve(opts: &Options) -> i32 {
+    xcdrv::TRACE_READS.store(false,Ordering::Relaxed);
     let mut table = match load_channels(opts) {
         Ok(t) => t,
         Err(e) => {
@@ -1344,6 +1251,25 @@ fn cmd_serve(opts: &Options) -> i32 {
         }
     };
     table.set_channel_type(&opts.channel_type);
+    if opts.bs2k {
+        if !opts.remux4k_backend || !opts.tune || opts.file.is_some() || opts.test_pattern || opts.idle_sleep_secs>0 || opts.raw_stream {
+            eprintln!("mkra: --bs2k requires --remux4k --tune, without file/test/raw/idle-sleep");return 2;
+        }
+        table.add_verified_bs2k();
+        if let Some(path)=&opts.isdbs_channels {
+            let result=std::fs::read_to_string(path).map_err(|e|e.to_string()).and_then(|s|table.add_isdbs_tsv(&s));
+            if let Err(e)=result {eprintln!("mkra: ISDB-S channel table: {e}");return 2;}
+        }
+    }
+    if opts.isdbs_channels.is_some() && !opts.bs2k {eprintln!("mkra: --isdbs-channels requires --bs2k");return 2;}
+    // Cross-process ownership for the integrated physical frontend.
+    let _frontend_lock=if opts.bs2k {
+        use std::os::fd::AsRawFd;
+        extern "C" {fn flock(fd:i32,op:i32)->i32;}
+        let file=match std::fs::OpenOptions::new().read(true).write(true).create(true).truncate(false).open("/tmp/mkra-tuner.lock") {Ok(f)=>f,Err(e)=>{eprintln!("mkra: tuner lock: {e}");return 1;}};
+        if unsafe {flock(file.as_raw_fd(),2|4)}!=0 {eprintln!("mkra: another integrated server owns the tuner");return 1;}
+        Some(file)
+    }else {None};
 
     // Set while the tuner is parked on a dead transponder. The SI still names
     // the old service then, so the "already on the right service" shortcut in
@@ -1398,7 +1324,7 @@ fn cmd_serve(opts: &Options) -> i32 {
             desc,
         )
     } else if opts.remux4k_backend {
-        warn_if_standby();
+        if !opts.bs2k {warn_if_standby();}
         let drv = match XcDrv::open_path(&opts.dev) {
             Ok(d) => Arc::new(d),
             Err(e) => {
@@ -1417,11 +1343,16 @@ fn cmd_serve(opts: &Options) -> i32 {
             .iter()
             .filter_map(|c| c.services.first().map(|s| (c.key.clone(), s.service_id)))
             .collect();
+        let legacy=Arc::new(AtomicBool::new(if opts.bs2k {
+            match bs2k::legacy_frontend() {Ok(v)=>v,Err(e)=>{eprintln!("mkra: frontend mode: {e}");return 1;}}
+        }else{false}));
+        let dirty=Arc::new(AtomicBool::new(false));
+        let unified=opts.bs2k;
+        let legacy_channels:BTreeMap<String,(u32,u16,u16)>=table.channels.iter().filter(|c|c.is_bs2k()).filter_map(|c|c.services.first().map(|s|(c.key.clone(),(c.freq_khz,c.tsid,s.service_id)))).collect();
         let base = remux4k::TapConfig {
             with_tsinfo: !opts.remux4k_no_tsinfo,
             es_level_abort: opts.remux4k_es_level_abort,
             stall_abort_ms: opts.remux4k_stall_abort_ms,
-            adts: !opts.remux4k_latm,
             ..remux4k::TapConfig::default()
         };
         // Tuning is opt-in. With `--tune`, a request for another service asks
@@ -1433,6 +1364,24 @@ fn cmd_serve(opts: &Options) -> i32 {
         let parked_for_factory = Arc::clone(&parked);
         (
             Box::new(move |key: &str| {
+                if dirty.load(Ordering::SeqCst) {return Err(io::Error::other("previous cleanup failed; tuner is blocked"))}
+                if let Some(&(freq,tsid,sid))=legacy_channels.get(key) {
+                    return bs2k::Source::open(Arc::clone(&drv),freq,tsid,sid,&legacy,Arc::clone(&dirty)).map(|s|Box::new(s) as Box<dyn TsSource>);
+                }
+                if !want.contains_key(key) {return Err(io::Error::other("unknown channel"))}
+                let restored=legacy.load(Ordering::SeqCst);
+                if restored {
+                    bs2k::restore_frontend()?;
+                    legacy.store(false,Ordering::SeqCst);
+                }
+                if unified {
+                    let asked=want[key];
+                    let live=unified_tune4k(&drv,asked,&oid,restored)?;
+                    let no_decoder=remux4k::discover(&drv).is_ok_and(|es|es.video_readers==0 || es.audio_readers==0);
+                    let cfg=remux4k::TapConfig {stream_id:live.tlv_stream_id, service_id:live.service_id,
+                        allow_no_decoder:true, es_level_abort:if no_decoder {101}else{base.es_level_abort}, ..base};
+                    return remux4k::Tap::open(Arc::clone(&drv),cfg).map(|t|Box::new(t) as Box<dyn TsSource>);
+                }
                 let mut live = si::live_service(si::ADSB_SI_DIR).ok_or_else(|| {
                     io::Error::other(format!(
                         "cannot tell which service the box is showing ({} unreadable or mid-change)",
@@ -1477,12 +1426,32 @@ fn cmd_serve(opts: &Options) -> i32 {
                 let cfg = remux4k::TapConfig {
                     stream_id: live.tlv_stream_id,
                     service_id: live.service_id,
+                    allow_no_decoder: unified,
+                    es_level_abort: if unified && remux4k::discover(&drv).is_ok_and(|es|es.video_readers==0 || es.audio_readers==0) {101}else{base.es_level_abort},
                     ..base
                 };
-                remux4k::Tap::open(Arc::clone(&drv), cfg)
-                    .map(|t| Box::new(t) as Box<dyn TsSource>)
+                match remux4k::Tap::open(Arc::clone(&drv), cfg) {
+                    Ok(t) => Ok(Box::new(t) as Box<dyn TsSource>),
+                    Err(first) => {
+                        // One retry: the product can still be settling right
+                        // after a change, and a second later the same sequence
+                        // succeeds.
+                        eprintln!("mkra: tap failed ({first}); retrying once");
+                        std::thread::sleep(Duration::from_millis(1000));
+                        let live = si::live_service(si::ADSB_SI_DIR).unwrap_or(live);
+                        let cfg = remux4k::TapConfig {
+                            stream_id: live.tlv_stream_id,
+                            service_id: live.service_id,
+                            allow_no_decoder: unified,
+                            es_level_abort: if unified && remux4k::discover(&drv).is_ok_and(|es|es.video_readers==0 || es.audio_readers==0) {101}else{base.es_level_abort},
+                            ..base
+                        };
+                        remux4k::Tap::open(Arc::clone(&drv), cfg)
+                            .map(|t| Box::new(t) as Box<dyn TsSource>)
+                    }
+                }
             }),
-            "BS4K REMUX tap (live MMT -> MPEG-TS)".to_string(),
+            if unified {"BS4K REMUX + BS2K native CAS/MULTI2 (one tuner)"}else{"BS4K REMUX tap (live MMT -> MPEG-TS)"}.to_string(),
         )
     } else if let Some(handle) = opts.buffer {
         warn_if_standby();
@@ -2357,23 +2326,15 @@ fn cmd_tsrec(opts: &Options) -> i32 {
         eprintln!("mkra: --tsi-port must be 0..7");
         return 2;
     }
-    if opts.tsi_preserve_config && (opts.tsi_port != 0 || !(1..=8).contains(&opts.seconds)) {
-        eprintln!("mkra: tsrec --tsi-preserve-config requires TSI0 and --seconds 1..8");
-        return 2;
-    }
     // The vendor only instantiates the TS input while the box is operating;
     // keep the same explicit gate used by the read-only probe commands so a
     // standby run cannot be mistaken for a negative TS_RECODER result.
     warn_if_standby();
-    let mut file: Box<dyn Write> = if out == "-" {
-        Box::new(io::stdout())
-    } else {
-        match std::fs::File::create(&out) {
-            Ok(file) => Box::new(file),
-            Err(e) => {
-                eprintln!("mkra: cannot create {out}: {e}");
-                return 1;
-            }
+    let mut file = match std::fs::File::create(&out) {
+        Ok(file) => file,
+        Err(e) => {
+            eprintln!("mkra: cannot create {out}: {e}");
+            return 1;
         }
     };
     let drv = match XcDrv::open_path(&opts.dev) {
@@ -2383,12 +2344,6 @@ fn cmd_tsrec(opts: &Options) -> i32 {
             return 1;
         }
     };
-    if opts.tsi_preserve_config {
-        if let Err(e) = fw_state::ensure_p4_idle(&drv).and_then(|_| ensure_2k_tsi0_state(&drv)) {
-            eprintln!("mkra: refuse preserve-config TS_RECODER probe: {e}");
-            return 1;
-        }
-    }
 
     let (mut device, mut buffer, mut connection, mut reader) = (0u32, 0u32, 0u32, 0u32);
     let mut running = false;
@@ -2397,13 +2352,9 @@ fn cmd_tsrec(opts: &Options) -> i32 {
         // `detect_stream` creates TS_RECODER.  Use serial mode (the SDK CLI
         // default) and that class's explicit flags; the product DEMUX differs
         // in its use_sync_signal bit.
-        if opts.tsi_preserve_config {
-            println!("tsrec: preserving physical TSI{} configuration", opts.tsi_port);
-        } else {
-            drv.configure_ts_recorder_physical_tsi(opts.tsi_port)
-                .map_err(|e| format!("configure physical TSI{}: {e}", opts.tsi_port))?;
-            println!("tsrec: physical TSI{} configured for SDK TS_RECODER", opts.tsi_port);
-        }
+        drv.configure_ts_recorder_physical_tsi(opts.tsi_port)
+            .map_err(|e| format!("configure physical TSI{}: {e}", opts.tsi_port))?;
+        println!("tsrec: physical TSI{} configured for SDK TS_RECODER", opts.tsi_port);
         device = drv.create_ts_recorder().map_err(|e| format!("create TS_RECODER: {e}"))?;
         println!("tsrec: device {device:#x}");
         buffer = drv
@@ -2645,12 +2596,10 @@ fn cmd_gr_off() -> i32 {
     }
 }
 
-const GATE5B9_FW_LOG: &str = "/tmp/fwlog.txt";
+const GATE5B9_FW_LOG: &str = "/tmp/mt/fwlog.txt";
 const GATE5B9_SF_RING_SIZE: usize = 0x7e000;
 const GATE5B9_SF_PHYS_START: u32 = 0x5000_0000;
 const GATE5B9_SF_PHYS_END: u32 = 0x5800_0000;
-const GATE5B9_TS_RING_BASE: u32 = 0x2803_4000;
-const GATE5B9_TS_RING_SIZE: usize = 0x468000;
 const GATE5B10_PDEV_PHYS_START: u32 = 0x1d00_0000;
 const GATE5B10_PDEV_PHYS_END: u32 = 0x2000_0000;
 const GATE5B10_MMR_OFFSETS: [u32; 11] = [
@@ -2704,36 +2653,18 @@ fn validate_gate5b9_sf_ring(base: u32, size: usize) -> Result<(), String> {
     Ok(())
 }
 
-fn read_fwlog_since(start: u64) -> Result<String, String> {
-    let mut file = std::fs::File::open(GATE5B9_FW_LOG)
-        .map_err(|e| format!("open firmware log: {e}"))?;
-    if file.metadata().map_err(|e| format!("stat firmware log: {e}"))?.len() < start {
-        return Err("firmware log was truncated during capture".to_string());
-    }
-    file.seek(SeekFrom::Start(start))
-        .map_err(|e| format!("seek firmware log: {e}"))?;
-    let mut text = String::new();
-    file.read_to_string(&mut text)
-        .map_err(|e| format!("read firmware log: {e}"))?;
-    Ok(text)
-}
-
-fn wait_for_gate5b9_sf_ring(log_start: u64, pat_section: bool) -> Result<(u32, usize), String> {
-    let deadline = Instant::now() + Duration::from_secs(12);
+fn wait_for_gate5b9_sf_ring() -> Result<(u32, usize), String> {
+    let deadline = Instant::now() + Duration::from_secs(2);
     loop {
-        if let Ok(text) = read_fwlog_since(log_start) {
+        if let Ok(text) = std::fs::read_to_string(GATE5B9_FW_LOG) {
             if let Some((base, size)) = parse_latest_sf_ring(&text) {
-                if pat_section {
-                    validate_gate5b9_sf_ring(base, size)?;
-                } else if (base, size) != (GATE5B9_TS_RING_BASE, GATE5B9_TS_RING_SIZE) {
-                    return Err(format!("refuse unexpected full-TS SF ring: base={base:#010x} size={size:#x}"));
-                }
+                validate_gate5b9_sf_ring(base, size)?;
                 return Ok((base, size));
             }
         }
         if Instant::now() >= deadline {
             return Err(format!(
-                "firmware SF ring was not reported in {GATE5B9_FW_LOG} within 12 s"
+                "firmware SF ring was not reported in {GATE5B9_FW_LOG} within 2 s"
             ));
         }
         std::thread::sleep(Duration::from_millis(20));
@@ -2755,10 +2686,10 @@ fn parse_latest_demux_pdev(text: &str) -> Option<u32> {
     })
 }
 
-fn wait_for_gate5b10_pdev(log_start: u64) -> Result<u32, String> {
-    let deadline = Instant::now() + Duration::from_secs(12);
+fn wait_for_gate5b10_pdev() -> Result<u32, String> {
+    let deadline = Instant::now() + Duration::from_secs(2);
     loop {
-        if let Ok(text) = read_fwlog_since(log_start) {
+        if let Ok(text) = std::fs::read_to_string(GATE5B9_FW_LOG) {
             if let Some(pdev) = parse_latest_demux_pdev(&text) {
                 if pdev & 0xff != 0
                     || pdev < GATE5B10_PDEV_PHYS_START
@@ -2771,7 +2702,7 @@ fn wait_for_gate5b10_pdev(log_start: u64) -> Result<u32, String> {
         }
         if Instant::now() >= deadline {
             return Err(format!(
-                "firmware DEMUX pdev was not reported in {GATE5B9_FW_LOG} within 12 s"
+                "firmware DEMUX pdev was not reported in {GATE5B9_FW_LOG} within 2 s"
             ));
         }
         std::thread::sleep(Duration::from_millis(20));
@@ -2830,241 +2761,11 @@ fn log_sf_snapshot(stage: &str, base: u32, bytes: &[u8]) {
 /// SYSTEM/TS ring. The pipeline/AV_SYNC owner comes from `Dxd_InitSproInfo`,
 /// and every input-side value through `run` comes from `Dxd_CreateRoute`.
 /// The only added operation is the ARC-validated PID=-1 SYSTEM/TS output port.
-fn cmd_tsi_crossbar_restore() -> i32 {
-    let result = (|| -> Result<(), String> {
-        let drv = XcDrv::open_path(xcdrv::DEV_PATH).map_err(|e| e.to_string())?;
-        let before = drv.mmr_read32(0x61f0).map_err(|e| e.to_string())?;
-        if before == 0x10 {
-            println!("TSI crossbar already restored: 0x{before:08x}");
-            return Ok(());
-        }
-        if before != 0x11 {
-            return Err(format!("refuse: TSI crossbar is 0x{before:08x}, expected 0x00000011"));
-        }
-        drv.set_tsi_crossbar_input0(0).map_err(|e| e.to_string())?;
-        let after = drv.mmr_read32(0x61f0).map_err(|e| e.to_string())?;
-        if after != 0x10 {
-            return Err(format!("TSI crossbar restore readback 0x{after:08x}"));
-        }
-        println!("TSI crossbar restored: 0x{before:08x} -> 0x{after:08x}");
-        Ok(())
-    })();
-    match result {
-        Ok(()) => 0,
-        Err(e) => { eprintln!("mkra: {e}"); 1 }
-    }
-}
-
-fn cmd_tsi_edge_restore() -> i32 {
-    let result = (|| -> Result<(), String> {
-        let drv = XcDrv::open_path(xcdrv::DEV_PATH).map_err(|e| e.to_string())?;
-        let before = drv.mmr_read32(0x6008).map_err(|e| e.to_string())?;
-        if before == 0x0300_0300 {
-            println!("TSI1 edge already restored: 0x{before:08x}");
-            return Ok(());
-        }
-        if before != 0x0100_0300 {
-            return Err(format!("refuse: TSI edge MMR is 0x{before:08x}, expected 0x01000300"));
-        }
-        drv.configure_product_mpeg_ts_tsi(1).map_err(|e| e.to_string())?;
-        let after = drv.mmr_read32(0x6008).map_err(|e| e.to_string())?;
-        if after != 0x0300_0300 {
-            return Err(format!("TSI1 edge restore readback 0x{after:08x}"));
-        }
-        println!("TSI1 edge restored: 0x{before:08x} -> 0x{after:08x}");
-        Ok(())
-    })();
-    match result {
-        Ok(()) => 0,
-        Err(e) => { eprintln!("mkra: {e}"); 1 }
-    }
-}
-
-fn cmd_tsi_edge_status_probe() -> i32 {
-    let mut modified = false;
-    let result = (|| -> Result<(), String> {
-        let status = gr_i2c::read_isdbs_status().map_err(|e| e.to_string())?;
-        if status.lock != 0x67 || status.ts_pin != 0x01 || status.ts_serial != 0xc0 {
-            return Err(format!(
-                "refuse: ISDB-S state lock={:02x} ts_pin={:02x} ts_serial={:02x}",
-                status.lock, status.ts_pin, status.ts_serial
-            ));
-        }
-        let drv = XcDrv::open_path(xcdrv::DEV_PATH).map_err(|e| e.to_string())?;
-        fw_state::ensure_p4_idle(&drv).map_err(|e| format!("refuse TSI edge probe: {e}"))?;
-        let before = drv.mmr_read32(0x6008).map_err(|e| e.to_string())?;
-        if before != 0x0100_0100 && before != 0x0300_0300 {
-            return Err(format!("refuse: TSI edge MMR is 0x{before:08x}, expected 0x01000100 or 0x03000300"));
-        }
-        let (lock, crc) = drv.tsi_status(1).map_err(|e| e.to_string())?;
-        println!("TSI1 before: lock={} crc={crc:02x}", u8::from(lock));
-        modified = true;
-        if before == 0x0100_0100 {
-            drv.configure_product_mpeg_ts_tsi(1)
-                .map_err(|e| format!("configure product TSI1: {e}"))?;
-            let active = drv.mmr_read32(0x6008).map_err(|e| e.to_string())?;
-            if active != 0x0300_0300 {
-                return Err(format!("product TSI1 readback 0x{active:08x}"));
-            }
-            for sample in 1..=4 {
-                std::thread::sleep(Duration::from_millis(250));
-                let (lock, crc) = drv.tsi_status(1).map_err(|e| e.to_string())?;
-                println!("TSI1 product-edge sample {sample}: lock={} crc={crc:02x}", u8::from(lock));
-            }
-        }
-        drv.configure_physical_tsi_edge(1, xcdrv::ME_PACKET_188, false, false, false)
-            .map_err(|e| format!("configure positive-edge TSI1: {e}"))?;
-        let active = drv.mmr_read32(0x6008).map_err(|e| e.to_string())?;
-        if active != 0x0100_0300 {
-            return Err(format!("positive-edge TSI1 readback 0x{active:08x}"));
-        }
-        for sample in 1..=4 {
-            std::thread::sleep(Duration::from_millis(250));
-            let (lock, crc) = drv.tsi_status(1).map_err(|e| e.to_string())?;
-            println!("TSI1 positive-edge sample {sample}: lock={} crc={crc:02x}", u8::from(lock));
-        }
-        Ok(())
-    })();
-    let restore = if modified { cmd_tsi_edge_restore() } else { 0 };
-    if let Err(e) = result {
-        eprintln!("mkra: {e}");
-        return 1;
-    }
-    restore
-}
-
-fn cmd_tsi1_baseline_signal_probe() -> i32 {
-    let result = (|| -> Result<(), String> {
-        let status = gr_i2c::read_isdbs_status().map_err(|e| e.to_string())?;
-        if status.lock != 0x67 || status.ts_pin != 0x01 || status.ts_serial != 0xc0 {
-            return Err(format!(
-                "refuse: ISDB-S state lock={:02x} ts_pin={:02x} ts_serial={:02x}",
-                status.lock, status.ts_pin, status.ts_serial
-            ));
-        }
-        let drv = XcDrv::open_path(xcdrv::DEV_PATH).map_err(|e| e.to_string())?;
-        fw_state::ensure_p4_idle(&drv).map_err(|e| format!("refuse TSI1 probe: {e}"))?;
-        let mmr = || -> Result<[u32; 3], String> {
-            Ok([
-                drv.mmr_read32(0x6000).map_err(|e| e.to_string())?,
-                drv.mmr_read32(0x6008).map_err(|e| e.to_string())?,
-                drv.mmr_read32(0x600c).map_err(|e| e.to_string())?,
-            ])
-        };
-        if mmr()? != [0x0100_0000, 0x0100_0100, 0x0000_0200] {
-            return Err("refuse: TSI MMR is not the measured startup baseline".to_owned());
-        }
-        let (lock, crc) = drv.tsi_status(1).map_err(|e| e.to_string())?;
-        println!("TSI1 before: lock={} crc={crc:02x}", u8::from(lock));
-        let result = (|| -> Result<(), String> {
-            drv.configure_tsi1_baseline_signal(true)
-                .map_err(|e| format!("configure TSI1: {e}"))?;
-            let active = mmr()?;
-            println!("TSI MMR active: {active:08x?}");
-            if active != [0x0300_0000, 0x0100_0100, 0x0000_0200] {
-                return Err("TSI1 configuration readback differs from expected values".to_owned());
-            }
-            for sample in 1..=8 {
-                std::thread::sleep(Duration::from_millis(250));
-                let (lock, crc) = drv.tsi_status(1).map_err(|e| e.to_string())?;
-                println!("TSI1 sample {sample}: lock={} crc={crc:02x}", u8::from(lock));
-            }
-            Ok(())
-        })();
-        drv.configure_tsi1_baseline_signal(false)
-            .map_err(|e| format!("restore TSI1: {e}"))?;
-        let restored = mmr()?;
-        println!("TSI MMR restored: {restored:08x?}");
-        if restored != [0x0100_0000, 0x0100_0100, 0x0000_0200] {
-            return Err("TSI1 restoration readback differs from startup baseline".to_owned());
-        }
-        result
-    })();
-    match result {
-        Ok(()) => 0,
-        Err(e) => { eprintln!("mkra: {e}"); 1 }
-    }
-}
-
 fn cmd_demux(opts: &Options) -> i32 {
-    let Some(source) = opts.demux_crossbar_source else {
-        return cmd_demux_core(opts);
-    };
-    if source != 1 || opts.dev != xcdrv::DEV_PATH || opts.tsi_port != 1 || opts.demux_logical_port != 0
-        || opts.demux_explicit_route || !(1..=8).contains(&opts.seconds)
-    {
-        eprintln!("mkra: --tsi-crossbar-source 1 requires physical TSI1, logical input 0, direct route and --seconds 1..8");
-        return 2;
-    }
-    if opts.dry_run {
-        println!("  ioctl 0x53         guarded crossbar input0: 0x00000010 -> 0x00000011 -> 0x00000010");
-        return cmd_demux_core(opts);
-    }
-    let drv = match XcDrv::open_path(&opts.dev) {
-        Ok(drv) => drv,
-        Err(e) => { eprintln!("mkra: open crossbar device: {e}"); return 1; }
-    };
-    let before = match drv.mmr_read32(0x61f0) {
-        Ok(value) => value,
-        Err(e) => { eprintln!("mkra: read crossbar: {e}"); return 1; }
-    };
-    if before != 0x10 {
-        eprintln!("mkra: refuse: crossbar is 0x{before:08x}, expected 0x00000010");
-        return 1;
-    }
-    if let Err(e) = drv.set_tsi_crossbar_input0(source) {
-        eprintln!("mkra: crossbar change failed: {e}");
-        return 1;
-    }
-    let active = drv.mmr_read32(0x61f0);
-    let capture = if matches!(active, Ok(0x11)) {
-        cmd_demux_core(opts)
-    } else {
-        eprintln!("mkra: crossbar active readback failed/mismatched: {active:?}");
-        1
-    };
-    let restore = cmd_tsi_crossbar_restore();
-    if restore != 0 { return 1; }
-    capture
-}
-
-fn ensure_2k_tsi0_state(drv: &XcDrv) -> io::Result<()> {
-    let status = gr_i2c::read_isdbs_status()?;
-    if status.lock != 0x67 || status.ts_pin != 1 || status.ts_serial != 0xc0
-        || drv.mmr_read32(0x6000)? != 0x0300_0000
-        || drv.mmr_read32(0x6008)? != 0x0300_0300
-        || drv.mmr_read32(0x600c)? != 0
-        || !drv.tsi_status(0)?.0
-    {
-        return Err(io::Error::other("unexpected 2K demodulator or TSI0 state"));
-    }
-    Ok(())
-}
-
-fn cmd_demux_core(opts: &Options) -> i32 {
-    if opts.tsi_port > 7 {
+    let crossbar = opts.command == "demux-crossbar";
+    let physical_port = if crossbar {0} else {opts.tsi_port};
+    if physical_port > 7 {
         eprintln!("mkra: --tsi-port must be 0..7");
-        return 2;
-    }
-    if opts.tsi_positive_edge
-        && (opts.tsi_port != 1 || opts.tsi_packet != xcdrv::ME_PACKET_188
-            || opts.tsi_use_sync || opts.tsi_parallel || opts.demux_crossbar_source.is_some()
-            || opts.demux_explicit_route || !(1..=8).contains(&opts.seconds))
-    {
-        eprintln!("mkra: --tsi-positive-edge requires TSI1, 188-byte serial input, direct route and --seconds 1..8");
-        return 2;
-    }
-    if opts.tsi_preserve_config
-        && (opts.tsi_port != 0 || opts.tsi_packet != xcdrv::ME_PACKET_188
-            || opts.tsi_use_sync || opts.tsi_parallel || opts.tsi_positive_edge
-            || opts.demux_crossbar_source.is_some() || opts.demux_explicit_route
-            || !(1..=8).contains(&opts.seconds))
-    {
-        eprintln!("mkra: --tsi-preserve-config requires TSI0, 188-byte input, direct route and --seconds 1..8");
-        return 2;
-    }
-    if opts.demux_logical_port > 1 || (opts.demux_explicit_route && opts.demux_logical_port != 0) {
-        eprintln!("mkra: --tsi-logical-port must be 0 or 1 and cannot be combined with --tsi-explicit-route");
         return 2;
     }
     if opts.pids.len() > 1 || opts.pids.first().is_some_and(|&pid| pid > 0x1fff) {
@@ -3081,12 +2782,16 @@ fn cmd_demux_core(opts: &Options) -> i32 {
         eprintln!("mkra: --ready-before-filter requires --pat-section");
         return 2;
     }
-    if opts.demux_observe_sf_ring && opts.tsi_port != 0 {
-        eprintln!("mkra: --observe-sf-ring requires --tsi-port 0");
+    if opts.demux_observe_sf_ring && (!opts.demux_pat_section || physical_port != 0) {
+        eprintln!("mkra: --observe-sf-ring requires --pat-section and --tsi-port 0");
         return 2;
     }
-    if opts.demux_observe_tsi_route && opts.tsi_port > 1 {
-        eprintln!("mkra: --observe-tsi-route requires --tsi-port 0 or 1");
+    if opts.demux_observe_tsi_route
+        && (!opts.demux_observe_sf_ring || !opts.demux_pat_section || physical_port != 0)
+    {
+        eprintln!(
+            "mkra: --observe-tsi-route requires --observe-sf-ring, --pat-section and --tsi-port 0"
+        );
         return 2;
     }
     let demux_pid = if opts.demux_pat_section {
@@ -3099,36 +2804,41 @@ fn cmd_demux_core(opts: &Options) -> i32 {
     } else {
         demux_pid.to_string()
     };
+    if crossbar && opts.seconds > 30 {
+        eprintln!("mkra: demux-crossbar is bounded to thirty seconds"); return 2;
+    }
     if opts.dry_run {
+        if crossbar { println!("EXPERIMENT: physical TSI0 -> config_ex logical TSI1 -> own DEMUX input1; restore both physical configs and identity crossbar after cleanup"); }
+
+        println!("TSI electrical settings: negative_edge={} active_high={}",
+                 !opts.tsi_rising_edge, !opts.tsi_valid_low);
         println!("DEMUX dry-run (symbolic handles are returned by the preceding ioctl):");
         println!("  ioctl 0x46         pipeline create: [OUT_PIPELINE]");
         println!("  ioctl 0x28         AV_SYNC create: [7,0,0,16,OUT_AVSYNC,0]");
         println!("  ioctl 0x000c002a   set AV_SYNC pipeline: [AVSYNC,PIPELINE]");
-        if opts.tsi_preserve_config {
-            println!("  physical TSI: preserve current configuration after verifying the 2K state");
-        } else {
-            println!(
-                "  ioctl 0x50         physical TSI: [{},{},{},1,{},0,1,0,{},0]",
-                opts.tsi_port, opts.tsi_packet, u32::from(opts.tsi_parallel), u32::from(opts.tsi_use_sync), u32::from(!opts.tsi_positive_edge)
-            );
-        }
-        if opts.tsi_positive_edge {
-            println!("  guarded TSI1 edge: MMR 0x6008 0x03000300 -> 0x01000300 -> 0x03000300");
-        }
+        println!(
+            "  ioctl 0x50         physical TSI: [{},{},{},1,{},0,{},0,{},0]",
+            physical_port, opts.tsi_packet, u32::from(opts.tsi_parallel), u32::from(opts.tsi_use_sync),
+            u32::from(!opts.tsi_valid_low), u32::from(!opts.tsi_rising_edge)
+        );
+        println!(
+            "RESULT gate=5E2-SYNC step=tsi_config ok=1 request=[{},{},{},1,{},0,{},0,{},0]",
+            physical_port, opts.tsi_packet, u32::from(opts.tsi_parallel), u32::from(opts.tsi_use_sync),
+            u32::from(!opts.tsi_valid_low), u32::from(!opts.tsi_rising_edge)
+        );
+        if crossbar {println!("  ioctl 0x53         copy configured physical0 fields; logical port=1, asi_port=0 (44B); restore saved port0/1 and identity map at exit");}
         println!("  ioctl 0x0259002a   AV_SYNC live mode: [AVSYNC,1,1,0,0,0,0,0]");
         println!("  ioctl 0x28         DEMUX create: [0x0c,0,32,0,OUT_DEVICE,0]");
         println!("  ioctl 0x000c002a   set pipeline: [DEVICE,PIPELINE]");
-        if opts.demux_explicit_route {
-            println!("  ioctl 0x01f4002a   explicit TSI{} route: [DEVICE,0,0x80000000,{}]", opts.tsi_port, opts.tsi_port);
-        } else {
-            println!("  ioctl 0x01f4002a   direct logical TSI route: [DEVICE,{},0,0]", opts.demux_logical_port);
-        }
+        println!(
+            "  ioctl 0x01f4002a   direct logical TSI route: [DEVICE,0,{},0]", if crossbar {1} else {0}
+        );
         println!("  ioctl 0x0001002a   run: [DEVICE,1,0]");
         if opts.demux_observe_resources {
             println!("  read-only resource snapshots: res_tool -l -A -a -t -s after run/reader/filter/ready/cleanup");
         }
         if opts.demux_observe_sf_ring {
-            println!("  read-only Gate 5B9: parse {GATE5B9_FW_LOG} setup_sf_ring and compare its physical ring before/after capture");
+            println!("  read-only Gate 5B9: parse {GATE5B9_FW_LOG} setup_sf_ring and compare its 0x7e000-byte physical ring before/after capture");
         }
         if opts.demux_observe_tsi_route {
             println!("  read-only Gate 5B10: volatile-load MMR TSI/crossbar registers and firmware DEMUX pdev route/source/flags at fixed lifecycle boundaries");
@@ -3156,9 +2866,6 @@ fn cmd_demux_core(opts: &Options) -> i32 {
         if !opts.demux_ready_before_filter {
             println!("  ioctl 0x00010035   set ready: BUFFER (value argument)");
         }
-        if opts.demux_run_after_filter {
-            println!("  ioctl 0x0001002a   retry run after filter and buffer ready: [DEVICE,1,0]");
-        }
         println!("  read: 0x3b / commit: 0x3c");
         if opts.demux_no_filter {
             println!("  cleanup: destroy reader -> disconnect -> verify writer/readers=0 -> force-reset/destroy buffer -> stop/destroy DEMUX -> stop pipeline -> destroy AV_SYNC/pipeline");
@@ -3169,19 +2876,23 @@ fn cmd_demux_core(opts: &Options) -> i32 {
         return 0;
     }
 
+    if crossbar {
+        let accepted = gr_i2c::read_output_regs().is_ok_and(|r| {
+            r.lock & 0x20 != 0 && r.bank2_selection[..2] == [0x40,0x10]
+            && r.bank0.iter().any(|&(reg,value)| reg == 0xcc && value & 0x80 != 0)
+            && r.bank7.iter().any(|&(reg,value)| reg == 0x72 && value == 0)
+        });
+        if !accepted { eprintln!("mkra: demux-crossbar requires measured locked BS-1/TSID4010 profile; no configuration changed"); return 2; }
+    }
     let Some(out) = opts.out.clone() else {
         eprintln!("mkra: demux needs --out <path>");
         return 2;
     };
-    let mut file: Box<dyn Write> = if out == "-" {
-        Box::new(io::stdout())
-    } else {
-        match std::fs::File::create(&out) {
-            Ok(file) => Box::new(file),
-            Err(e) => {
-                eprintln!("mkra: cannot create {out}: {e}");
-                return 1;
-            }
+    let mut file = match std::fs::File::create(&out) {
+        Ok(file) => file,
+        Err(e) => {
+            eprintln!("mkra: cannot create {out}: {e}");
+            return 1;
         }
     };
     let drv = match XcDrv::open_path(&opts.dev) {
@@ -3191,23 +2902,19 @@ fn cmd_demux_core(opts: &Options) -> i32 {
             return 1;
         }
     };
-    if let Err(e) = fw_state::ensure_p4_idle(&drv) {
-        eprintln!("mkra: refuse DEMUX probe: {e}");
-        return 1;
-    }
-    if opts.tsi_preserve_config {
-        if let Err(e) = ensure_2k_tsi0_state(&drv) {
-            eprintln!("mkra: refuse preserve-config DEMUX probe: {e}");
-            return 1;
-        }
-    }
 
+    let saved_mapping = if crossbar {
+        match drv.snapshot_tsi_mapping() {
+            Ok(v) => {eprintln!("demux: saved TSI rollback image {v:?}"); Some(v)},
+            Err(e) => {eprintln!("mkra: TSI snapshot refused: {e}"); return 1;}
+        }
+    } else {None};
     let (mut pipeline, mut av_sync, mut device, mut buffer, mut connection, mut reader) =
         (0u32, 0u32, 0u32, 0u32, 0u32, 0u32);
     let mut running = false;
+    let mut tsi_touched = false;
     let mut device_stopped = false;
     let mut filter_added = false;
-    let mut edge_modified = false;
     let observe_resources = |stage: &str| -> Result<(), String> {
         if !opts.demux_observe_resources {
             return Ok(());
@@ -3237,26 +2944,13 @@ fn cmd_demux_core(opts: &Options) -> i32 {
     };
     let capture = (|| -> Result<(u64, Vec<u8>), String> {
         let mut observed_pdev: Option<u32> = None;
-        let log_start = if opts.demux_observe_tsi_route || opts.demux_observe_sf_ring {
-            std::fs::metadata(GATE5B9_FW_LOG)
-                .map_err(|e| format!("firmware log must be active: {e}"))?
-                .len()
-        } else {
-            0
-        };
         let log_tsi = |stage: &str| -> Result<(), String> {
             let (lock, crc) = drv
-                .tsi_status(opts.tsi_port)
-                .map_err(|e| format!("read TSI{} status at {stage}: {e}", opts.tsi_port))?;
-            let config = drv
-                .mmr_read32(0x6000)
-                .map_err(|e| format!("read TSI config at {stage}: {e}"))?;
-            let status = drv
-                .mmr_read32(0x6004)
-                .map_err(|e| format!("read TSI lock bits at {stage}: {e}"))?;
+                .tsi_status(physical_port)
+                .map_err(|e| format!("read TSI{} status at {stage}: {e}", physical_port))?;
             eprintln!(
-                "demux: TSI{} status {stage}: lock={} crc={crc:02x} config={config:08x} lock_bits={status:08x}",
-                opts.tsi_port,
+                "demux: TSI{} status {stage}: lock={} crc={crc:02x}",
+                physical_port,
                 u8::from(lock)
             );
             Ok(())
@@ -3277,24 +2971,10 @@ fn cmd_demux_core(opts: &Options) -> i32 {
         av_sync = drv.create_av_sync().map_err(|e| format!("create AV_SYNC: {e}"))?;
         drv.set_pipeline(av_sync, pipeline)
             .map_err(|e| format!("set AV_SYNC pipeline: {e}"))?;
-        if opts.tsi_preserve_config {
-            eprintln!("demux: preserving physical TSI{} configuration", opts.tsi_port);
-        } else if opts.tsi_positive_edge {
-            let before = drv.mmr_read32(0x6008).map_err(|e| e.to_string())?;
-            if before != 0x0300_0300 {
-                return Err(format!("refuse: TSI edge MMR is 0x{before:08x}, expected 0x03000300"));
-            }
-            edge_modified = true;
-            drv.configure_physical_tsi_edge(1, xcdrv::ME_PACKET_188, false, false, false)
-                .map_err(|e| format!("configure positive-edge TSI1: {e}"))?;
-            let active = drv.mmr_read32(0x6008).map_err(|e| e.to_string())?;
-            if active != 0x0100_0300 {
-                return Err(format!("positive-edge TSI1 readback 0x{active:08x}"));
-            }
-        } else {
-            drv.configure_physical_tsi(opts.tsi_port, opts.tsi_packet, opts.tsi_use_sync, opts.tsi_parallel)
-                .map_err(|e| format!("configure product MPEG-TS TSI{}: {e}", opts.tsi_port))?;
-        }
+        tsi_touched = crossbar;
+        drv.configure_physical_tsi_polarity(physical_port, opts.tsi_packet, opts.tsi_use_sync, !opts.tsi_rising_edge, !opts.tsi_valid_low, opts.tsi_parallel)
+            .map_err(|e| format!("configure product MPEG-TS TSI{}: {e}", physical_port))?;
+        if crossbar {drv.map_tsi_one_to_zero().map_err(|e|format!("map logical1 to physical0: {e}"))?;}
         log_tsi("after physical config")?;
         if opts.demux_observe_tsi_route {
             log_gate5b10_route_snapshot(&drv, "after_physical_config", None)?;
@@ -3305,18 +2985,14 @@ fn cmd_demux_core(opts: &Options) -> i32 {
         drv.set_pipeline(device, pipeline)
             .map_err(|e| format!("set DEMUX pipeline: {e}"))?;
         if opts.demux_observe_tsi_route {
-            observed_pdev = Some(wait_for_gate5b10_pdev(log_start)?);
+            observed_pdev = Some(wait_for_gate5b10_pdev()?);
             log_gate5b10_route_snapshot(&drv, "before_demux_route", observed_pdev)?;
         }
-        // The product's observed 4K path uses logical port 0. Its 2K
-        // mapping is unobserved, so keep this selector independent of the
-        // physical TSI port for a bounded comparison.
-        if opts.demux_explicit_route {
-            drv.config_tsi_explicit_route(device, opts.tsi_port)
-        } else {
-            drv.config_tsi_product_route(device, opts.demux_logical_port)
-        }
-            .map_err(|e| format!("configure DEMUX TSD route: {e}"))?;
+        // `abs` keeps the TSD route m_port at zero for both live spro/system
+        // values.  The physical setup port is a separate layer: BS system=2
+        // maps to physical TSI1, while this product route remains port 0.
+        if crossbar {drv.config_ts_recorder_tsi(device,1)} else {drv.config_tsi_product_route(device)}
+            .map_err(|e| format!("configure DEMUX TSI route: {e}"))?;
         log_tsi("after DEMUX route")?;
         if opts.demux_observe_tsi_route {
             log_gate5b10_route_snapshot(&drv, "after_demux_route", observed_pdev)?;
@@ -3337,21 +3013,21 @@ fn cmd_demux_core(opts: &Options) -> i32 {
             let mut previous_locked_crc = None;
             loop {
                 let (lock, crc) = drv
-                    .tsi_status(opts.tsi_port)
-                    .map_err(|e| format!("wait for TSI{} relock: {e}", opts.tsi_port))?;
+                    .tsi_status(physical_port)
+                    .map_err(|e| format!("wait for TSI{} relock: {e}", physical_port))?;
                 eprintln!(
                     "demux: TSI{} relock wait: lock={} crc={crc:02x}",
-                    opts.tsi_port,
+                    physical_port,
                     u8::from(lock)
                 );
                 if tsi_has_locked_crc_progress(&mut previous_locked_crc, lock, crc) {
-                    eprintln!("demux: TSI{} relocked with CRC progress", opts.tsi_port);
+                    eprintln!("demux: TSI{} relocked with CRC progress", physical_port);
                     break;
                 }
                 if Instant::now() >= deadline {
                     return Err(format!(
                         "TSI{} did not relock with CRC progress within 10 s",
-                        opts.tsi_port
+                        physical_port
                     ));
                 }
                 std::thread::sleep(Duration::from_millis(100));
@@ -3456,14 +3132,6 @@ fn cmd_demux_core(opts: &Options) -> i32 {
                 log_ring(label, buffer)?;
             }
         }
-        if opts.demux_run_after_filter {
-            drv.run_product_demux(device)
-                .map_err(|e| format!("run DEMUX after filter and buffer ready: {e}"))?;
-            log_tsi("after second DEMUX run")?;
-            if opts.demux_observe_tsi_route {
-                log_gate5b10_route_snapshot(&drv, "after_second_demux_run", observed_pdev)?;
-            }
-        }
         let status_before = match drv.sbuf_status_raw(buffer) {
             Ok(status) => {
                 eprintln!("demux: ring status before capture {status:x?}");
@@ -3475,7 +3143,7 @@ fn cmd_demux_core(opts: &Options) -> i32 {
             }
         };
         let sf_before = if opts.demux_observe_sf_ring {
-            let (base, size) = wait_for_gate5b9_sf_ring(log_start, opts.demux_pat_section)?;
+            let (base, size) = wait_for_gate5b9_sf_ring()?;
             let bytes = graph::ObjReader::new(Arc::clone(&drv))
                 .read_phys(base, size)
                 .map_err(|e| format!("read firmware SF ring before capture: {e}"))?;
@@ -3687,21 +3355,23 @@ fn cmd_demux_core(opts: &Options) -> i32 {
     if let Err(e) = observe_resources("after_cleanup") {
         eprintln!("mkra: DIRTY_REBOOT_REQUIRED cleanup resource snapshot failed: {e}");
     }
-    if edge_modified && cmd_tsi_edge_restore() != 0 {
-        return 1;
-    }
 
+    if let Some(saved) = saved_mapping.as_ref().filter(|_| tsi_touched) {
+        if let Err(e) = drv.restore_tsi_mapping(saved) {
+            eprintln!("mkra: TSI_ROLLBACK_FAILED: {e}"); return 1;
+        }
+    }
     match capture {
         Ok((total, sample)) => {
             let ratio = xcdrv::ts_sync_ratio(&sample);
             if opts.demux_pat_section {
                 let pats = valid_pat_sections(&sample);
-                eprintln!("demux: wrote {total} section bytes; valid PAT sections {pats}");
+                println!("demux: wrote {total} section bytes; valid PAT sections {pats}");
                 return if total > 0 && pats > 0 { 0 } else { 1 };
             }
-            eprintln!("demux: wrote {total} bytes; 188-byte sync ratio {ratio:.4}");
+            println!("demux: wrote {total} bytes; 188-byte sync ratio {ratio:.4}");
             if opts.demux_no_filter {
-                eprintln!("demux: Gate 5A input binding lifecycle completed without a PID filter");
+                println!("demux: Gate 5A input binding lifecycle completed without a PID filter");
                 0
             } else if total == 0 || ratio < 0.75 {
                 1
@@ -3861,6 +3531,8 @@ fn cmd_remux4k(opts: &Options) -> i32 {
         es_level_abort: opts.remux4k_es_level_abort,
         stall_abort_ms: opts.remux4k_stall_abort_ms,
         adts: !opts.remux4k_latm,
+        allow_no_decoder: opts.remux4k_allow_no_decoder,
+        raw_output: opts.raw_stream,
         ..remux4k::TapConfig::default()
     };
     match live_service {
@@ -3962,51 +3634,6 @@ fn cmd_remux4k(opts: &Options) -> i32 {
     }
 }
 
-fn cmd_latm2adts(opts: &Options) -> i32 {
-    let (Some(input), Some(output)) = (opts.file.as_deref(), opts.out.as_deref()) else {
-        eprintln!("mkra: latm2adts needs --file <in.ts> and --out <out.ts>");
-        return 2;
-    };
-    let data = match std::fs::read(input) {
-        Ok(d) => d,
-        Err(e) => {
-            eprintln!("mkra: read {input}: {e}");
-            return 1;
-        }
-    };
-    let start = match (0..188.min(data.len())).find(|&i| {
-        (0..3).all(|k| data.get(i + k * 188) == Some(&0x47))
-    }) {
-        Some(s) => s,
-        None => {
-            eprintln!("mkra: {input}: no 188-byte TS framing found");
-            return 1;
-        }
-    };
-    let whole = (data.len() - start) / 188 * 188;
-    let mut rw = latm::AdtsRewriter::new();
-    let mut out = Vec::with_capacity(data.len() + data.len() / 50);
-    rw.process(&data[start..start + whole], &mut out);
-    if let Err(e) = std::fs::write(output, &out) {
-        eprintln!("mkra: write {output}: {e}");
-        return 1;
-    }
-    println!(
-        "latm2adts: {} PES converted, {} passed through, {} AAC frames, {} errors -> {output}",
-        rw.pes_converted,
-        rw.pes_passed,
-        rw.frames(),
-        rw.errors()
-    );
-    if rw.pes_converted > 0 { 0 } else { 1 }
-}
-
-/// Ask the product to change channel and wait for its own SI to agree.
-///
-/// The product republishes `AdsbSiMhSdtActual.dat` once the new service runs,
-/// which is the same evidence `si::live_service` uses everywhere else, so the
-/// switch is confirmed by the box rather than assumed from a send that cannot
-/// be acknowledged. Measured: the new service appears within about 4 s.
 fn tune_and_wait(service_id: u16, oid: &Arc<AtomicU32>) -> io::Result<si::LiveService> {
     tune_and_wait_mode(service_id, oid, tuner::TUNE_CHANNEL_CHANGE)
 }
@@ -4038,6 +3665,46 @@ fn sleep_decode(service_id: u16, oid: &Arc<AtomicU32>) -> io::Result<()> {
     let t = tuner::Tuner::open_qid(tuner::ADSB_COMM_QID, tuner::MSGH_LIST)?;
     eprintln!("mkra: idle — asking the box to stop decoding (service {service_id})");
     t.change_channel(&req)
+}
+
+/// The native presentation cache can retain a previous MH-SDT indefinitely
+/// after BS2K stops HDMI decoding. Confirm native acquired package and live ES,
+/// rather than waiting for the HDMI decoder or assigning the requested ID.
+fn unified_tune4k(drv:&Arc<XcDrv>,asked:u16,oid:&Arc<AtomicU32>,force:bool)->io::Result<si::LiveService> {
+    let send=|mode|->io::Result<()> {
+        let (tsid,freq,bid)=channels::tuning_record(asked).ok_or_else(||io::Error::other("unknown 4K service"))?;
+        tuner::Tuner::open_qid(tuner::ADSB_COMM_QID,tuner::MSGH_LIST)?.change_channel(&tuner::ChangeChannelRequest {
+            oid:oid.fetch_add(1,Ordering::Relaxed),tune:mode,not_decode:0,service_id:asked,freq_khz:freq,tlv_stream_id:tsid,bid,
+        })
+    };
+    let selection=native_selection::Reader::open()?;
+    if force || selection.selected()?.map(|s|s.live.service_id)!=Some(asked) || remux4k::discover(drv).is_err() {
+        send(tuner::TUNE_CHANNEL_CHANGE)?;
+        std::thread::sleep(Duration::from_millis(1000));
+    }
+    let begin=Instant::now();let mut resumed=false;let mut last=String::from("native request/acquired package not settled on requested service");
+    while begin.elapsed()<Duration::from_secs(11) {
+        if let Some(selected)=selection.selected()? {
+            if selected.live.service_id==asked {
+                match remux4k::verify_fresh_es(drv) {
+                    Ok(())=>{
+                        // Both acquired package and requested channel must still agree
+                        // after observing fresh writes on the same ES pair.
+                        if selection.selected()?==Some(selected) {
+                            eprintln!("mkra: unified 4K confirmed native acquired package service {} TLV {:#06x} + fresh stable video/audio ES",selected.live.service_id,selected.live.tlv_stream_id);
+                            return Ok(selected.live);
+                        }
+                    }
+                    Err(e)=>last=e.to_string(),
+                }
+            }
+        }
+        if !resumed && begin.elapsed()>Duration::from_secs(5) && remux4k::discover(drv).is_err() {
+            send(tuner::TUNE_RESUME)?;resumed=true;
+        }
+        std::thread::sleep(Duration::from_millis(250));
+    }
+    Err(io::Error::other(format!("4K selection not confirmed for {asked}: {last}")))
 }
 
 fn tune_and_wait_mode(
@@ -4637,7 +4304,7 @@ fn cmd_tsi_mmr(opts: &Options) -> i32 {
     }
 
     println!("XCode6 TSI status ioctl 0x51 (read-only):");
-    for port in 0..=7 {
+    for port in 0..=1 {
         match drv.tsi_status(port) {
             Ok((locked, crc)) => println!(
                 "  TSI{port}: lock={} crc=0x{crc:02x}",
@@ -4657,41 +4324,6 @@ fn cmd_tsi_mmr(opts: &Options) -> i32 {
 ///
 /// This is the safe replacement for `probe --scan`: handles come from the
 /// driver's own tables, so no invented value ever reaches an ioctl.
-fn cmd_graph_status(opts: &Options) -> i32 {
-    let graph = match graph::Graph::read() {
-        Ok(graph) => graph,
-        Err(e) => {
-            eprintln!("mkra: cannot read driver graph: {e}");
-            return 1;
-        }
-    };
-    let Some((count, _, rows)) = graph.tables.get("device") else {
-        eprintln!("mkra: graph has no device table");
-        return 1;
-    };
-    let drv = match XcDrv::open_path(&opts.dev) {
-        Ok(drv) => drv,
-        Err(e) => {
-            eprintln!("mkra: cannot open driver: {e}");
-            return 1;
-        }
-    };
-    println!("XCode6 device states (read-only):");
-    for row in rows.iter().filter(|row| row.index < *count as usize) {
-        let Some(&handle) = row.words.first() else {
-            continue;
-        };
-        if handle == 0 {
-            continue;
-        }
-        match drv.device_status(handle) {
-            Ok(status) => println!("  device={handle:#x} status={status:#x}"),
-            Err(e) => println!("  device={handle:#x} error={e}"),
-        }
-    }
-    0
-}
-
 fn cmd_graph(opts: &Options) -> i32 {
     let g = match graph::Graph::read() {
         Ok(g) => g,
@@ -4954,7 +4586,7 @@ fn cmd_cpld(opts: &Options) -> i32 {
 fn cmd_tune_fed(opts: &Options, kind: &str) -> i32 {
     let req = match kind {
         "adbs" | "4k" => tuner::FedTuneRequest::advanced_bs(opts.tsid, opts.freq_khz),
-        "isdb-s" | "bs" | "cs" => {
+        "isdb-s" | "isdb-s-fem" | "bs" | "cs" => {
             let Some(path) = opts.path else {
                 eprintln!("mkra: --fed isdb-s needs --path <1..4>");
                 return 2;
@@ -4968,7 +4600,7 @@ fn cmd_tune_fed(opts: &Options, kind: &str) -> i32 {
             }
         }
         other => {
-            eprintln!("mkra: --fed must be `adbs` or `isdb-s`, got `{other}`");
+            eprintln!("mkra: --fed must be `adbs`, `isdb-s` or `isdb-s-fem`, got `{other}`");
             return 2;
         }
     };
@@ -4977,11 +4609,14 @@ fn cmd_tune_fed(opts: &Options, kind: &str) -> i32 {
         return 2;
     }
 
+    let managed = kind == "isdb-s-fem";
+    let qid = if managed { tuner::FEMD_QID } else { req.fed_qid };
+    let msg_id = if managed { tuner::MSG_FEM_LEGACY_TUNING_START } else { tuner::MSG_FED_SET_TUNING_START };
     let freq = req.freq_word().unwrap();
     println!(
         "frontend {:?}\n  qid        {}\n  RF         {} kHz\n  freq word  {:#010x}{}\n  TSID       {:04X}\n  reply qid  {}",
         req.frontend,
-        req.fed_qid,
+        qid,
         req.rf_khz,
         freq,
         match req.frontend {
@@ -4993,22 +4628,23 @@ fn cmd_tune_fed(opts: &Options, kind: &str) -> i32 {
         req.stream_id,
         req.reply_qid,
     );
+    println!("  message id {msg_id:#x}");
 
     if opts.dry_run {
         println!("\n--dry-run: nothing was sent.");
         return 0;
     }
 
-    let t = match tuner::Tuner::open_qid(req.fed_qid, tuner::MSGH_LIST) {
+    let t = match tuner::Tuner::open_qid(qid, tuner::MSGH_LIST) {
         Ok(t) => t,
         Err(e) => {
-            eprintln!("mkra: queue for qid {} unavailable: {e}", req.fed_qid);
+            eprintln!("mkra: queue for qid {qid} unavailable: {e}");
             return 1;
         }
     };
-    match t.tune_fed(&req) {
+    match if managed { t.tune_fem_legacy(&req) } else { t.tune_fed(&req) } {
         Ok(()) => {
-            println!("\nposted msgId=2 to msqid {}", t.msqid());
+            println!("\nposted msgId={msg_id:#x} to msqid {}", t.msqid());
             println!(
                 "check it landed:  python3 tools/analysis/ipcmap.py --pid <tuner pid>\n\
                  then read the FED's msgrcv buffer with `mkra probe --peek`."
@@ -5156,4 +4792,43 @@ fn cmd_tune(opts: &Options) -> i32 {
             1
         }
     }
+}
+
+fn cmd_latm2adts(opts: &Options) -> i32 {
+    let (Some(input), Some(output)) = (opts.file.as_deref(), opts.out.as_deref()) else {
+        eprintln!("mkra: latm2adts needs --file <in.ts> and --out <out.ts>");
+        return 2;
+    };
+    let data = match std::fs::read(input) {
+        Ok(d) => d,
+        Err(e) => {
+            eprintln!("mkra: read {input}: {e}");
+            return 1;
+        }
+    };
+    let start = match (0..188.min(data.len())).find(|&i| {
+        (0..3).all(|k| data.get(i + k * 188) == Some(&0x47))
+    }) {
+        Some(s) => s,
+        None => {
+            eprintln!("mkra: {input}: no 188-byte TS framing found");
+            return 1;
+        }
+    };
+    let whole = (data.len() - start) / 188 * 188;
+    let mut rw = latm::AdtsRewriter::new();
+    let mut out = Vec::with_capacity(data.len() + data.len() / 50);
+    rw.process(&data[start..start + whole], &mut out);
+    if let Err(e) = std::fs::write(output, &out) {
+        eprintln!("mkra: write {output}: {e}");
+        return 1;
+    }
+    println!(
+        "latm2adts: {} PES converted, {} passed through, {} AAC frames, {} errors -> {output}",
+        rw.pes_converted,
+        rw.pes_passed,
+        rw.frames(),
+        rw.errors()
+    );
+    if rw.pes_converted > 0 { 0 } else { 1 }
 }

@@ -1,0 +1,38 @@
+# BS2K / BS4KのEPG連携ツール
+
+**新規導入は[導入手順](../../docs/EPGSTATION-INSTALL.ja.md)を参照。** proxy、両scanner、timer、共通設定、backup、録画・再生検証を一続きで説明する。既存ホストへ無条件に配置・再起動するスクリプトではない。
+
+| ファイル | 役割 |
+| --- | --- |
+| server.cjs | network4/11のcache統合、BS表示変換、番組stream終了制御 |
+| bs-eit.cjs / scan-bs.cjs | 通常BS6局のH-EIT解析/60秒収集 |
+| scan-4k.cjs | 4K各サービスを選局し、実際のprograms APIから取得 |
+| epg.env.example | 全3サービスのEnvironmentFile雛形。実IPは利用者が設定 |
+| bs4k-epg-proxy.service | localhost40773のproxy常駐 |
+| bs4k-epg-scan.service / .timer | 共通flock付き4K巡回、2時間周期 |
+| bs2k-epg-scan.service / .timer | 同じflock付き通常BS巡回、30分周期 |
+| bs4k-epg.tmpfiles.conf | 実行ユーザーのcache directoryと共通lockを作成 |
+| epgstation.service.example | 新規導入向けEPGStation常駐例 |
+| serialized-scan.conf | 既存4K unitを移行する場合のdrop-in例。新規unitと二重管理しない |
+
+`MKRA_URL`と`EPGSTATION_URL`、cacheパス、ARIBTS_PATHを全serviceで統一する。新規配置では`scan-4k.cjs`をその名前で使い、古い`scan.cjs`へのrenameは不要。
+
+## ホスト試験
+
+```sh
+npm ci --ignore-scripts --prefix tools/epgstation
+npm test --prefix tools/epgstation
+python3 -m compileall -q tools/epgstation
+```
+
+合成EIT、ID/経路、番組EOF、placeholderカウンタ0での4K初回収集とbusy時cache保全を確認する。実機へは接続しない。
+
+本体のstatus.storedEventsは0のplaceholderなのでscannerの起動条件にしない。4Kは各serviceの実programsから取得し、通常BSはCRC正常な放送H-EITだけを収集する。
+
+## 動作範囲
+
+番組ID配信の終了はキャッシュの終了時刻に基づき、番組延長への継続追従には対応しません。
+
+`fix-transition-playback.py`は特定2.10.0構成向けの任意パッチで、設定/TS/distをbackupし、想定外なら停止する。`verify-transition.py`/`verify-guide-record.cjs`は`--record`で本当に予約を作るので、導入先の保守時間にだけ実行する。`verify-recorded-av.py`はlocalhost8888・録画先/recordedを前提とする。
+
+[トラブル対応](../../docs/TROUBLESHOOTING.ja.md)。生ログ・設定・DB・録画はGitへ追加しない。
