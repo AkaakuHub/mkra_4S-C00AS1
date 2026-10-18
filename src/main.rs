@@ -55,6 +55,27 @@ use stream::{Broker, BrokerConfig};
 use tssrc::{FileSource, NullSource, PassiveRingSource, TsSource};
 use xcdrv::XcDrv;
 
+static REMUX_TERMINATE: AtomicBool = AtomicBool::new(false);
+
+#[cfg(unix)]
+extern "C" {
+    fn signal(sig: i32, handler: extern "C" fn(i32)) -> usize;
+}
+
+#[cfg(unix)]
+extern "C" fn request_remux_termination(_: i32) {
+    REMUX_TERMINATE.store(true, Ordering::Relaxed);
+}
+
+fn install_remux_termination_handler() -> io::Result<()> {
+    REMUX_TERMINATE.store(false, Ordering::Relaxed);
+    #[cfg(unix)]
+    if unsafe { signal(15, request_remux_termination) } == usize::MAX {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
+}
+
 fn is_xce_no_support(error: &io::Error) -> bool {
     error.raw_os_error() == Some(1003)
 }
@@ -3796,6 +3817,10 @@ fn cmd_remux4k(opts: &Options) -> i32 {
         eprintln!("mkra: remux4k needs --out <path> ('-' for stdout)");
         return 2;
     };
+    if let Err(e) = install_remux_termination_handler() {
+        eprintln!("mkra: cannot handle stream termination: {e}");
+        return 1;
+    }
     let mut sink: Box<dyn Write> = if out == "-" {
         Box::new(io::stdout())
     } else {
@@ -3863,12 +3888,15 @@ fn cmd_remux4k(opts: &Options) -> i32 {
     let mut ts_total = 0u64;
     let mut pids: std::collections::BTreeMap<u16, usize> = std::collections::BTreeMap::new();
     let mut failure: Option<String> = None;
-    while Instant::now() < deadline {
+    while Instant::now() < deadline && !REMUX_TERMINATE.load(Ordering::Relaxed) {
         ts.clear();
         match tap.read_into(&mut ts) {
             Ok(0) => continue,
             Ok(_) => {}
             Err(e) => {
+                if REMUX_TERMINATE.load(Ordering::Relaxed) {
+                    break;
+                }
                 failure = Some(e.to_string());
                 break;
             }
