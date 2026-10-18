@@ -1362,6 +1362,7 @@ fn cmd_serve(opts: &Options) -> i32 {
         // waits for its own SI to confirm; without it, mkra serves only what
         // the box is already showing.
         let may_tune = opts.tune;
+        let collect_epg = opts.epg_tap;
         let oid = Arc::new(AtomicU32::new(0x40));
         let resume_for_factory = Arc::clone(&resume_required);
         (
@@ -1382,6 +1383,11 @@ fn cmd_serve(opts: &Options) -> i32 {
                 if unified {
                     let asked=want[key];
                     let live=unified_tune4k(&drv,asked,&oid,restored || resume_for_factory.load(Ordering::SeqCst))?;
+                    if collect_epg {
+                        if let Err(e) = tuner::Tuner::set_epg_service(live.service_id) {
+                            eprintln!("mkra: cannot start native EPG collection: {e}");
+                        }
+                    }
                     let no_decoder=remux4k::discover(&drv).is_ok_and(|es|es.video_readers==0 || es.audio_readers==0);
                     let cfg=remux4k::TapConfig {stream_id:live.tlv_stream_id, service_id:live.service_id,
                         allow_no_decoder:true, es_level_abort:if no_decoder {101}else{base.es_level_abort}, ..base};
