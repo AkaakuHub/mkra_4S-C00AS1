@@ -88,6 +88,7 @@ USAGE:
   mkra tsi-crossbar-restore
   mkra tsi-edge-restore
   mkra tsi-edge-status-probe
+  mkra tsi1-baseline-signal-probe
   mkra isdbs-tmcc-tsids
   mkra isdbs-ts-exclusive
   mkra dmd-regs
@@ -382,6 +383,7 @@ fn main() {
         "tsi-crossbar-restore" => cmd_tsi_crossbar_restore(),
         "tsi-edge-restore" => cmd_tsi_edge_restore(),
         "tsi-edge-status-probe" => cmd_tsi_edge_status_probe(),
+        "tsi1-baseline-signal-probe" => cmd_tsi1_baseline_signal_probe(),
         "isdbs-tmcc-tsids" => cmd_isdbs_tmcc_tsids(),
         "dmd-regs" => cmd_dmd_regs(),
         "dmd-hiz-probe" => cmd_dmd_hiz_probe(false),
@@ -2900,6 +2902,59 @@ fn cmd_tsi_edge_status_probe() -> i32 {
         return 1;
     }
     restore
+}
+
+fn cmd_tsi1_baseline_signal_probe() -> i32 {
+    let result = (|| -> Result<(), String> {
+        let status = gr_i2c::read_isdbs_status().map_err(|e| e.to_string())?;
+        if status.lock != 0x67 || status.ts_pin != 0x01 || status.ts_serial != 0xc0 {
+            return Err(format!(
+                "refuse: ISDB-S state lock={:02x} ts_pin={:02x} ts_serial={:02x}",
+                status.lock, status.ts_pin, status.ts_serial
+            ));
+        }
+        let drv = XcDrv::open_path(xcdrv::DEV_PATH).map_err(|e| e.to_string())?;
+        fw_state::ensure_p4_idle(&drv).map_err(|e| format!("refuse TSI1 probe: {e}"))?;
+        let mmr = || -> Result<[u32; 3], String> {
+            Ok([
+                drv.mmr_read32(0x6000).map_err(|e| e.to_string())?,
+                drv.mmr_read32(0x6008).map_err(|e| e.to_string())?,
+                drv.mmr_read32(0x600c).map_err(|e| e.to_string())?,
+            ])
+        };
+        if mmr()? != [0x0100_0000, 0x0100_0100, 0x0000_0200] {
+            return Err("refuse: TSI MMR is not the measured startup baseline".to_owned());
+        }
+        let (lock, crc) = drv.tsi_status(1).map_err(|e| e.to_string())?;
+        println!("TSI1 before: lock={} crc={crc:02x}", u8::from(lock));
+        let result = (|| -> Result<(), String> {
+            drv.configure_tsi1_baseline_signal(true)
+                .map_err(|e| format!("configure TSI1: {e}"))?;
+            let active = mmr()?;
+            println!("TSI MMR active: {active:08x?}");
+            if active != [0x0300_0000, 0x0100_0100, 0x0000_0200] {
+                return Err("TSI1 configuration readback differs from expected values".to_owned());
+            }
+            for sample in 1..=8 {
+                std::thread::sleep(Duration::from_millis(250));
+                let (lock, crc) = drv.tsi_status(1).map_err(|e| e.to_string())?;
+                println!("TSI1 sample {sample}: lock={} crc={crc:02x}", u8::from(lock));
+            }
+            Ok(())
+        })();
+        drv.configure_tsi1_baseline_signal(false)
+            .map_err(|e| format!("restore TSI1: {e}"))?;
+        let restored = mmr()?;
+        println!("TSI MMR restored: {restored:08x?}");
+        if restored != [0x0100_0000, 0x0100_0100, 0x0000_0200] {
+            return Err("TSI1 restoration readback differs from startup baseline".to_owned());
+        }
+        result
+    })();
+    match result {
+        Ok(()) => 0,
+        Err(e) => { eprintln!("mkra: {e}"); 1 }
+    }
 }
 
 fn cmd_demux(opts: &Options) -> i32 {

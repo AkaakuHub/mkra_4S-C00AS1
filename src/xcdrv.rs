@@ -872,6 +872,17 @@ impl XcDrv {
         Ok(())
     }
 
+    pub fn configure_tsi1_baseline_signal(&self, enabled: bool) -> io::Result<()> {
+        let mut req = product_physical_tsi_request(1, ME_PACKET_188, false);
+        req[3] = u32::from(enabled);
+        req[6] = 0;
+        req[8] = 0;
+        req[9] = 1;
+        log_raw_words("TSI1 baseline signal request", &req);
+        unsafe { self.call(TSI_CONFIG, &mut req)? };
+        Ok(())
+    }
+
     /// Read one physical TSI status without changing its configuration.
     /// `libvixs:xcode_tsi_status_check @0x7be48` returns per-port CRC samples
     /// in words 0..7 and the lock bitmask in word 8.
