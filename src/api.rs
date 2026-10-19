@@ -731,7 +731,9 @@ fn stream(state: &AppState, req: &Request, out: &mut TcpStream, channel_key: &st
     // reports the tuner busy, and every other channel gets 503 for the lifetime
     // of the process. A silent tuner has to fail like a busy one, not like a
     // working one.
-    let mut buf = vec![0u8; 64 * 1024];
+    let mut buf = vec![0u8; 64 * 1024 / 188 * 188];
+    let mut initial_pcr = !crate::stream::RAW_PASSTHROUGH.load(Ordering::Relaxed)
+        && state.table.channels.iter().any(|c| c.key == channel_key && c.ch_type() == "BS4K");
     let deadline = Instant::now() + FIRST_BYTE_TIMEOUT;
     let first = loop {
         let n = sub.read(&mut buf, Duration::from_millis(200));
@@ -762,6 +764,9 @@ fn stream(state: &AppState, req: &Request, out: &mut TcpStream, channel_key: &st
         state.broker.unsubscribe(&session, &sub);
         return;
     }
+    if initial_pcr {
+        initial_pcr = !crate::remux4k::mark_initial_pcr_discontinuity(&mut buf[..first]);
+    }
     if out.write_all(&buf[..first]).is_err() {
         state.broker.unsubscribe(&session, &sub);
         return;
@@ -782,6 +787,9 @@ fn stream(state: &AppState, req: &Request, out: &mut TcpStream, channel_key: &st
             continue;
         }
         idle_since = Instant::now();
+        if initial_pcr {
+            initial_pcr = !crate::remux4k::mark_initial_pcr_discontinuity(&mut buf[..n]);
+        }
         if out.write_all(&buf[..n]).is_err() {
             break; // client went away
         }
