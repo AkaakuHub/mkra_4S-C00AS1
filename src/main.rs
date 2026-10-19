@@ -1558,12 +1558,26 @@ fn cmd_serve(opts: &Options) -> i32 {
         factory,
     );
 
+    let health: api::HealthProbe = if opts.test_pattern || opts.file.is_some() {
+        Box::new(|| Ok(true))
+    } else if opts.remux4k_backend || opts.buffer.is_some() {
+        let cleanup_failed = Arc::clone(&cleanup_failed);
+        Box::new(move || {
+            if cleanup_failed.load(Ordering::SeqCst) {
+                return Err(io::Error::other("previous cleanup failed; tuner is blocked"));
+            }
+            fw_state::queue_available()
+        })
+    } else {
+        Box::new(|| Ok(false))
+    };
     let state = Arc::new(api::AppState::new(
         table,
         Arc::clone(&broker),
         opts.tune,
         backend.clone(),
         epg,
+        health,
     ));
 
     // EPG comes from the product's own MMT-SI cache, so it is independent of

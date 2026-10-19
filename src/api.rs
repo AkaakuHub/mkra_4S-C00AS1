@@ -6,7 +6,7 @@
 //! way in, `decode` as a query parameter, HEAD support, 503 when no tuner is
 //! free). DESIGN.md §2 lists what is implemented and what is deliberately not.
 
-use std::io::Write;
+use std::io::{self, Write};
 use std::net::TcpStream;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
@@ -40,6 +40,8 @@ const FIRST_BYTE_TIMEOUT: Duration = Duration::from_secs(10);
 /// frontend has stopped and release it.
 const STALL_TIMEOUT: Duration = Duration::from_secs(15);
 
+pub type HealthProbe = Box<dyn Fn() -> io::Result<bool> + Send + Sync>;
+
 pub struct AppState {
     pub table: ChannelTable,
     pub broker: Arc<Broker>,
@@ -47,6 +49,7 @@ pub struct AppState {
     pub requests: AtomicU64,
     pub tuning_enabled: bool,
     pub backend: String,
+    pub health: HealthProbe,
     /// EPG parsed from the product's own MMT-SI cache. Empty until
     /// `--epg-dir` is given and the box has actually acquired a schedule.
     pub epg: Arc<RwLock<SiDb>>,
@@ -59,6 +62,7 @@ impl AppState {
         tuning_enabled: bool,
         backend: String,
         epg: Arc<RwLock<SiDb>>,
+        health: HealthProbe,
     ) -> Self {
         AppState {
             table,
@@ -68,6 +72,7 @@ impl AppState {
             tuning_enabled,
             backend,
             epg,
+            health,
         }
     }
 
@@ -301,6 +306,7 @@ fn services_json(list: &[(&Channel, &Service)]) -> String {
 fn tuners_json(state: &AppState) -> String {
     let session = state.broker.current();
     let using = session.is_some();
+    let health = (state.health)();
     json::array(|a| {
         a.obj(|o| {
             o.num("index", 0)
@@ -335,17 +341,18 @@ fn tuners_json(state: &AppState) -> String {
                         }
                     }
                 })
-                .bool("isAvailable", true)
+                .bool("isAvailable", matches!(&health, Ok(true)))
                 .bool("isRemote", false)
                 .bool("isFree", !using)
                 .bool("isUsing", using)
-                .bool("isFault", false);
+                .bool("isFault", health.is_err());
         });
     })
 }
 
 fn status_json(state: &AppState) -> String {
     let session = state.broker.current();
+    let health = (state.health)();
     let streams = session.as_ref().map(|s| s.subscribers().len()).unwrap_or(0);
     let errors = session
         .as_ref()
@@ -355,6 +362,13 @@ fn status_json(state: &AppState) -> String {
     json::object(|o| {
         o.u64("time", sys::unix_time_ms())
             .str("version", COMPAT_MIRAKURUN_VERSION)
+            .obj("tunerHealth", |h| {
+                h.bool("isAvailable", matches!(&health, Ok(true)))
+                    .bool("isFault", health.is_err());
+                if let Err(error) = &health {
+                    h.str("error", &error.to_string());
+                }
+            })
             .obj("process", |p| {
                 p.str("arch", std::env::consts::ARCH)
                     .str("platform", std::env::consts::OS)
@@ -837,7 +851,7 @@ mod tests {
             BrokerConfig::default(),
             Box::new(|_| Ok(Box::new(NullSource) as Box<dyn TsSource>)),
         );
-        AppState::new(ChannelTable::builtin(), broker, false, "null".into(), Arc::new(RwLock::new(SiDb::new())))
+        AppState::new(ChannelTable::builtin(), broker, false, "null".into(), Arc::new(RwLock::new(SiDb::new())), Box::new(|| Ok(true)))
     }
 
     /// Minimal structural check: balanced braces/brackets outside strings.
@@ -964,6 +978,7 @@ mod tests {
             false,
             "null".into(),
             Arc::new(RwLock::new(SiDb::new())),
+            Box::new(|| Ok(true)),
         );
         assert_eq!(s.tuner_type(), "BS4K");
         let (_, body) = render(&s, "/api/tuners");
