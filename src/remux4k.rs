@@ -53,6 +53,19 @@ pub const MEDIA_AUDIO_ES: u32 = 6;
 /// the recording ring: PCR 0x1001, PMT 0x0100, HEVC 0x1011, AAC 0x1100.
 pub const PROGRAM_NUMBER: u32 = 1;
 pub const PCR_PID: u32 = 0x1001;
+
+pub fn mark_initial_pcr_discontinuity(data: &mut [u8]) -> bool {
+    for packet in data.chunks_exact_mut(188) {
+        let pid = (u32::from(packet[1] & 31) << 8) | u32::from(packet[2]);
+        if packet[0] == 0x47 && pid == PCR_PID && packet[3] & 0x20 != 0
+            && packet[4] >= 7 && packet[5] & 0x10 != 0
+        {
+            packet[5] |= 0x80;
+            return true;
+        }
+    }
+    false
+}
 pub const PMT_PID: u32 = 0x0100;
 pub const PCR_INTERVAL: u32 = 100;
 pub const VIDEO_PID: u32 = 0x1011;
