@@ -5,7 +5,12 @@
 //! A request alone is insufficient: during measured 141->161 tuning, +0x1c
 //! already named 161 while +0x30 still named 141 and +0x28/+0x2c were busy.
 use crate::{channels, si::LiveService, snapshot::procmem};
-use std::{fs, io, process::Command};
+use std::{
+    fs, io,
+    process::Command,
+    thread,
+    time::{Duration, Instant},
+};
 
 const SESSION: u32 = 0x0039_a37c;
 const PREFIX_LEN: usize = 64;
@@ -46,10 +51,28 @@ impl Reader {
         Ok(Self { pid })
     }
     pub fn selected(&self) -> io::Result<Option<Selection>> {
+        Ok(parse(&self.read()?))
+    }
+
+    pub fn wait_idle(&self, timeout: Duration) -> io::Result<()> {
+        let started = Instant::now();
+        while self.read()?[0x28..0x30].iter().any(|byte| *byte != 0) {
+            if started.elapsed() >= timeout {
+                return Err(io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    "native tuner did not become idle",
+                ));
+            }
+            thread::sleep(Duration::from_millis(250));
+        }
+        Ok(())
+    }
+
+    fn read(&self) -> io::Result<Vec<u8>> {
         if fs::read_to_string(format!("/proc/{}/comm", self.pid))?.trim() != "adsb" {
             return Err(io::Error::other("ADSB process identity changed"));
         }
-        Ok(parse(&procmem::read(self.pid, SESSION, PREFIX_LEN)?))
+        procmem::read(self.pid, SESSION, PREFIX_LEN)
     }
 }
 

@@ -3650,6 +3650,7 @@ fn unified_tune4k(drv:&Arc<XcDrv>,asked:u16,oid:&Arc<AtomicU32>)->io::Result<si:
         })
     };
     let selection=native_selection::Reader::open()?;
+    selection.wait_idle(Duration::from_secs(90))?;
     send(tuner::TUNE_CHANNEL_CHANGE)?;
     std::thread::sleep(Duration::from_millis(1000));
     let begin=Instant::now();let mut resumed=false;let mut last=String::from("native request/acquired package not settled on requested service");
