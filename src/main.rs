@@ -1562,11 +1562,18 @@ fn cmd_serve(opts: &Options) -> i32 {
         Box::new(|| Ok(true))
     } else if opts.remux4k_backend || opts.buffer.is_some() {
         let cleanup_failed = Arc::clone(&cleanup_failed);
+        let queue = match fw_state::RequestQueue::open() {
+            Ok(queue) => queue,
+            Err(error) => {
+                eprintln!("mkra: cannot initialize native tuner health: {error}");
+                return 1;
+            }
+        };
         Box::new(move || {
             if cleanup_failed.load(Ordering::SeqCst) {
                 return Err(io::Error::other("previous cleanup failed; tuner is blocked"));
             }
-            fw_state::queue_available()
+            queue.available()
         })
     } else {
         Box::new(|| Ok(false))

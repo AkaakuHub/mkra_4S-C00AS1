@@ -3,21 +3,31 @@ use std::io;
 use crate::graph::{ksym, Kmem};
 use crate::xcdrv::{XcDrv, DEV_PATH};
 
-pub fn queue_available() -> io::Result<bool> {
-    let mut kmem = Kmem::open()?;
-    let ctx = kmem.u32(ksym("gps_XCode")?)?;
-    if ctx < 0x8000_0000 || kmem.u32(ctx + 0x463b0)? != 100 {
-        return Err(io::Error::other("unexpected XCode6 request queue layout"));
+pub struct RequestQueue {
+    context_symbol: u32,
+}
+
+impl RequestQueue {
+    pub fn open() -> io::Result<Self> {
+        Ok(Self { context_symbol: ksym("gps_XCode")? })
     }
-    let free_head = ctx + 0x48014;
-    if kmem.u32(ctx + 0x48020)? != free_head {
-        return Err(io::Error::other("unexpected XCode6 request queue head"));
+
+    pub fn available(&self) -> io::Result<bool> {
+        let mut kmem = Kmem::open()?;
+        let ctx = kmem.u32(self.context_symbol)?;
+        if ctx < 0x8000_0000 || kmem.u32(ctx + 0x463b0)? != 100 {
+            return Err(io::Error::other("unexpected XCode6 request queue layout"));
+        }
+        let free_head = ctx + 0x48014;
+        if kmem.u32(ctx + 0x48020)? != free_head {
+            return Err(io::Error::other("unexpected XCode6 request queue head"));
+        }
+        Ok(kmem.u32(free_head)? != free_head)
     }
-    Ok(kmem.u32(free_head)? != free_head)
 }
 
 pub fn ensure_p4_idle(drv: &XcDrv) -> io::Result<()> {
-    if !queue_available()? {
+    if !RequestQueue::open()?.available()? {
         return Err(io::Error::other("XCode6 request queue has no free slots"));
     }
     let pending = drv.mmr_read32(0x170d4)?;
