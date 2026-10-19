@@ -3643,20 +3643,25 @@ fn tune_and_wait(service_id: u16, oid: &Arc<AtomicU32>) -> io::Result<si::LiveSe
 /// after BS2K stops HDMI decoding. Confirm native acquired package and live ES,
 /// rather than waiting for the HDMI decoder or assigning the requested ID.
 fn unified_tune4k(drv:&Arc<XcDrv>,asked:u16,oid:&Arc<AtomicU32>)->io::Result<si::LiveService> {
-    let send=|mode|->io::Result<()> {
-        let (tsid,freq,bid)=channels::tuning_record(asked).ok_or_else(||io::Error::other("unknown 4K service"))?;
-        tuner::Tuner::open_qid(tuner::ADSB_COMM_QID,tuner::MSGH_LIST)?.change_channel(&tuner::ChangeChannelRequest {
-            oid:oid.fetch_add(1,Ordering::Relaxed),tune:mode,not_decode:0,service_id:asked,freq_khz:freq,tlv_stream_id:tsid,bid,
-        })
-    };
     let selection=native_selection::Reader::open()?;
     selection.wait_idle(Duration::from_secs(90))?;
-    send(tuner::TUNE_CHANNEL_CHANGE)?;
+    let send=|mode|->io::Result<u8> {
+        let (tsid,freq,bid)=channels::tuning_record(asked).ok_or_else(||io::Error::other("unknown 4K service"))?;
+        let mut request_oid=oid.fetch_add(1,Ordering::Relaxed);
+        if selection.selected()?.is_some_and(|selected|selected.oid==request_oid as u8) {
+            request_oid=oid.fetch_add(1,Ordering::Relaxed);
+        }
+        tuner::Tuner::open_qid(tuner::ADSB_COMM_QID,tuner::MSGH_LIST)?.change_channel(&tuner::ChangeChannelRequest {
+            oid:request_oid,tune:mode,not_decode:0,service_id:asked,freq_khz:freq,tlv_stream_id:tsid,bid,
+        })?;
+        Ok(request_oid as u8)
+    };
+    let mut requested_oid=send(tuner::TUNE_CHANNEL_CHANGE)?;
     std::thread::sleep(Duration::from_millis(1000));
     let begin=Instant::now();let mut resumed=false;let mut last=String::from("native request/acquired package not settled on requested service");
     while begin.elapsed()<Duration::from_secs(11) {
         if let Some(selected)=selection.selected()? {
-            if selected.live.service_id==asked {
+            if selected.live.service_id==asked && selected.oid==requested_oid {
                 match remux4k::verify_fresh_es(drv) {
                     Ok(())=>{
                         // Both acquired package and requested channel must still agree
@@ -3671,7 +3676,7 @@ fn unified_tune4k(drv:&Arc<XcDrv>,asked:u16,oid:&Arc<AtomicU32>)->io::Result<si:
             }
         }
         if !resumed && begin.elapsed()>Duration::from_secs(5) && remux4k::discover(drv).is_err() {
-            send(tuner::TUNE_RESUME)?;resumed=true;
+            requested_oid=send(tuner::TUNE_RESUME)?;resumed=true;
         }
         std::thread::sleep(Duration::from_millis(250));
     }
