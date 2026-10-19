@@ -371,8 +371,16 @@ fn status_json(state: &AppState) -> String {
                     });
             })
             .obj("epg", |e| {
-                // No EPG source yet; see DESIGN.md §9.
-                e.arr("gatheringNetworks", |_| {}).num("storedEvents", 0);
+                e.arr("gatheringNetworks", |_| {});
+                if let Ok(db) = state.epg.read() {
+                    e.num("storedEvents", db.programs.len() as i64)
+                        .arr("presentFollowingServices", |services| {
+                            let ids: std::collections::BTreeSet<_> = db.present_following.keys()
+                                .map(|(nid, sid, _)| u64::from(*nid) * 100000 + u64::from(*sid))
+                                .collect();
+                            for id in ids { services.num(id as i64); }
+                        });
+                }
             })
             .u64("rpcCount", state.requests.load(Ordering::Relaxed))
             .obj("streamCount", |s| {
