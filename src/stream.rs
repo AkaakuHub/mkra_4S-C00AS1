@@ -392,19 +392,24 @@ impl Broker {
         agent: String,
         url: String,
     ) -> Result<(Arc<Session>, Arc<Subscriber>), SubscribeError> {
-        let mut state = self.lock_for(channel_key)?;
-
-        if let Some(session) = state.as_ref() {
-            let session = Arc::clone(session);
-            let mut subs = session.subscribers.lock().unwrap_or_else(|e| e.into_inner());
-            if subs.len() >= self.cfg.max_clients {
-                return Err(SubscribeError::TooManyClients);
+        let mut state = loop {
+            let state = self.lock_for(channel_key)?;
+            if let Some(session) = state.as_ref() {
+                let session = Arc::clone(session);
+                let mut subs = session.subscribers.lock().unwrap_or_else(|e| e.into_inner());
+                if session.stop.load(Ordering::Relaxed) {
+                    continue;
+                }
+                if subs.len() >= self.cfg.max_clients {
+                    return Err(SubscribeError::TooManyClients);
+                }
+                let sub = Arc::new(Subscriber::new(id, priority, agent, url, self.cfg.ring_bytes));
+                subs.push(Arc::clone(&sub));
+                drop(subs);
+                return Ok((session, sub));
             }
-            let sub = Arc::new(Subscriber::new(id, priority, agent, url, self.cfg.ring_bytes));
-            subs.push(Arc::clone(&sub));
-            drop(subs);
-            return Ok((session, sub));
-        }
+            break state;
+        };
 
         let source = (self.factory)(channel_key).map_err(SubscribeError::Source)?;
         let sub = Arc::new(Subscriber::new(id, priority, agent, url, self.cfg.ring_bytes));
@@ -449,7 +454,7 @@ impl Broker {
         loop {
             let state = self.state.lock().unwrap_or_else(|e| e.into_inner());
             let Some(current) = state.as_ref() else { return Ok(state) };
-            if current.channel_key == channel_key {
+            if current.channel_key == channel_key && !current.stop.load(Ordering::Relaxed) {
                 return Ok(state);
             }
             let current = Arc::clone(current);
@@ -463,7 +468,7 @@ impl Broker {
                 continue;
             }
             eprintln!(
-                "mkra: switching from {} to {channel_key}: releasing the idle session",
+                "mkra: opening {channel_key}: releasing the inactive session {}",
                 current.channel_key
             );
             current.stop();
