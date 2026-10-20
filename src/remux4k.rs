@@ -28,7 +28,7 @@
 //! * No PSI section rings are borrowed from the product. PAT/PMT are generated
 //!   here instead, from the PIDs we ourselves declared to the REMUX.
 
-use std::sync::Arc;
+use std::sync::{atomic::{AtomicBool, Ordering}, Arc};
 
 use crate::graph::Graph;
 use crate::xcdrv::XcDrv;
@@ -554,6 +554,7 @@ impl Default for TapConfig {
 /// starves the product's decoder.
 pub struct Tap {
     drv: Arc<XcDrv>,
+    cleanup_failed: Arc<AtomicBool>,
     cfg: TapConfig,
     live: LiveEs,
     device: u32,
@@ -605,7 +606,10 @@ impl Tap {
         self
     }
 
-    pub fn open(drv: Arc<XcDrv>, cfg: TapConfig) -> io::Result<Self> {
+    pub fn open(drv: Arc<XcDrv>, cfg: TapConfig, cleanup_failed: Arc<AtomicBool>) -> io::Result<Self> {
+        if cleanup_failed.load(Ordering::SeqCst) {
+            return Err(io::Error::other("previous graph cleanup failed; inspect before restarting"));
+        }
         let live = discover(&drv).map_err(io::Error::other)?;
         if live.video_readers == 0 || live.audio_readers == 0 {
             if !cfg.allow_no_decoder {
@@ -642,6 +646,7 @@ impl Tap {
         );
         let mut tap = Tap {
             drv,
+            cleanup_failed,
             cfg,
             live,
             device: 0,
@@ -750,11 +755,18 @@ impl Tap {
     /// order: readers, stop, remove streams, remove program, disconnect
     /// inputs then outputs, destroy buffers, destroy the device.
     fn teardown(&mut self) {
-        self.src = None;
-        self.info_src = None;
+        for (label, source) in [("TSOUT", self.src.take()), ("TSINFO", self.info_src.take())] {
+            if let Some(mut source) = source {
+                if let Err(e) = source.close() {
+                    self.cleanup_failed.store(true, Ordering::SeqCst);
+                    eprintln!("mkra: warning: close {label} reader: {e}");
+                }
+            }
+        }
         let d = Arc::clone(&self.drv);
         if self.running {
             if let Err(e) = d.stop_device(self.device) {
+                self.cleanup_failed.store(true, Ordering::SeqCst);
                 eprintln!("mkra: warning: stop REMUX {:#x}: {e}", self.device);
             }
             self.running = false;
@@ -762,6 +774,7 @@ impl Tap {
         if self.streams_added {
             for (label, conn) in [("video", self.conn_video), ("audio", self.conn_audio)] {
                 if let Err(e) = d.remux_remove_stream(self.device, conn, u32::from(self.cfg.service_id)) {
+                    self.cleanup_failed.store(true, Ordering::SeqCst);
                     eprintln!("mkra: warning: remove {label} stream: {e}");
                 }
             }
@@ -769,6 +782,7 @@ impl Tap {
         }
         if self.program_added {
             if let Err(e) = d.remux_remove_program(self.device, u32::from(self.cfg.service_id)) {
+                self.cleanup_failed.store(true, Ordering::SeqCst);
                 eprintln!("mkra: warning: remove program: {e}");
             }
             self.program_added = false;
@@ -781,6 +795,7 @@ impl Tap {
         ] {
             if conn != 0 {
                 if let Err(e) = d.disconnect(self.device, conn) {
+                    self.cleanup_failed.store(true, Ordering::SeqCst);
                     eprintln!("mkra: warning: disconnect {label} {conn:#x}: {e}");
                 }
             }
@@ -792,6 +807,7 @@ impl Tap {
         for (label, buffer) in [("TSINFO", self.tsinfo), ("TSOUT", self.tsout)] {
             if buffer != 0 {
                 if let Err(e) = d.destroy_buffer(buffer) {
+                    self.cleanup_failed.store(true, Ordering::SeqCst);
                     eprintln!("mkra: warning: destroy {label} {buffer:#x}: {e}");
                 }
             }
@@ -800,6 +816,7 @@ impl Tap {
         self.tsout = 0;
         if self.device != 0 {
             if let Err(e) = d.destroy_device(self.device) {
+                self.cleanup_failed.store(true, Ordering::SeqCst);
                 eprintln!("mkra: warning: destroy REMUX {:#x}: {e}", self.device);
             }
             self.device = 0;

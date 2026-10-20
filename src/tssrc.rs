@@ -39,6 +39,23 @@ pub struct XcReaderSource {
 }
 
 impl XcReaderSource {
+    pub fn close(&mut self) -> io::Result<()> {
+        let reader = std::mem::take(&mut self.reader);
+        if reader == 0 {
+            return Ok(());
+        }
+        let cancel = self.drv.cancel_get_read(reader);
+        let destroy = self.drv.destroy_reader(reader);
+        match (cancel, destroy) {
+            (Ok(()), Ok(())) => Ok(()),
+            (Err(cancel), Err(destroy)) => Err(io::Error::other(format!(
+                "cancel_get_read({reader:#x}): {cancel}; destroy_reader({reader:#x}): {destroy}"
+            ))),
+            (Err(e), _) => Err(io::Error::other(format!("cancel_get_read({reader:#x}): {e}"))),
+            (_, Err(e)) => Err(io::Error::other(format!("destroy_reader({reader:#x}): {e}"))),
+        }
+    }
+
     pub fn attach(
         drv: Arc<XcDrv>,
         buffer_handle: u32,
@@ -154,17 +171,8 @@ impl Drop for XcReaderSource {
     fn drop(&mut self) {
         // Cancel first: a reader parked in get_read cannot be destroyed, and a
         // buffer with a live reader cannot be destroyed either.
-        if let Err(e) = self.drv.cancel_get_read(self.reader) {
-            eprintln!(
-                "mkra: warning: cancel_get_read({:#x}) failed: {e}",
-                self.reader
-            );
-        }
-        if let Err(e) = self.drv.destroy_reader(self.reader) {
-            eprintln!(
-                "mkra: warning: destroy_reader({:#x}) failed: {e}",
-                self.reader
-            );
+        if let Err(e) = self.close() {
+            eprintln!("mkra: warning: reader cleanup failed: {e}");
         }
     }
 }

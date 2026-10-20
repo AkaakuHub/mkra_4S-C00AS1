@@ -1404,7 +1404,7 @@ fn cmd_serve(opts: &Options) -> i32 {
                     let no_decoder=remux4k::discover(&drv).is_ok_and(|es|es.video_readers==0 || es.audio_readers==0);
                     let cfg=remux4k::TapConfig {stream_id:live.tlv_stream_id, service_id:live.service_id,
                         allow_no_decoder:true, es_level_abort:if no_decoder {101}else{base.es_level_abort}, ..base};
-                    return remux4k::Tap::open(Arc::clone(&drv),cfg).map(|t| {
+                    return remux4k::Tap::open(Arc::clone(&drv),cfg,Arc::clone(&dirty)).map(|t| {
                         resume_for_factory.store(false, Ordering::SeqCst);
                         Box::new(t.with_epg(Arc::clone(&epg_for_source), live.original_network_id)) as Box<dyn TsSource>
                     });
@@ -1452,7 +1452,7 @@ fn cmd_serve(opts: &Options) -> i32 {
                     es_level_abort: if unified && remux4k::discover(&drv).is_ok_and(|es|es.video_readers==0 || es.audio_readers==0) {101}else{base.es_level_abort},
                     ..base
                 };
-                remux4k::Tap::open(Arc::clone(&drv), cfg)
+                remux4k::Tap::open(Arc::clone(&drv), cfg, Arc::clone(&dirty))
                     .map(|t| Box::new(t.with_epg(Arc::clone(&epg_for_source), live.original_network_id)) as Box<dyn TsSource>)
             }),
             if unified {"BS4K REMUX + BS2K native CAS/MULTI2 (one tuner)"}else{"BS4K REMUX tap (live MMT -> MPEG-TS)"}.to_string(),
@@ -3561,7 +3561,7 @@ fn cmd_remux4k(opts: &Options) -> i32 {
         ),
     }
 
-    let mut tap = match remux4k::Tap::open(Arc::clone(&drv), cfg) {
+    let mut tap = match remux4k::Tap::open(Arc::clone(&drv), cfg, Arc::new(AtomicBool::new(false))) {
         Ok(tap) => tap,
         Err(e) => {
             eprintln!("mkra: remux4k failed: {e}");
