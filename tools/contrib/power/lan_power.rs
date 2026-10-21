@@ -1,6 +1,8 @@
 #[cfg(not(all(target_arch = "arm", target_pointer_width = "32")))]
 compile_error!("this tool requires the verified ARM32 receiver");
 
+mod lan_trial;
+
 use std::fs;
 use std::io;
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
@@ -52,9 +54,28 @@ fn request(fd: &OwnedFd, number: u32, data: &mut [u32]) -> io::Result<()> {
     Ok(())
 }
 
+fn pmt(fd: &OwnedFd) -> io::Result<u32> {
+    let mut registers = [0, 0x2c, 0];
+    request(fd, 0x89f1, &mut registers)?;
+    Ok(registers[2])
+}
+
+fn software_power_down(fd: &OwnedFd) -> io::Result<bool> {
+    let mut state = [0; 218];
+    request(fd, 0x89f3, &mut state)?;
+    match state[0xb0 / 4] {
+        0 => Ok(false),
+        1 => Ok(true),
+        _ => Err(io::Error::other("unexpected MAC power state")),
+    }
+}
+
 fn run() -> io::Result<()> {
-    if std::env::args().skip(1).collect::<Vec<_>>() != ["--status"] {
-        return Err(io::Error::other("usage: lan_power --status"));
+    let args: Vec<_> = std::env::args().skip(1).collect();
+    if args != ["--status"] && args != ["--test-mac-wake"] {
+        return Err(io::Error::other(
+            "usage: lan_power --status | --test-mac-wake",
+        ));
     }
     let fd = verified_socket()?;
     let mut driver = [0; 49];
@@ -63,14 +84,16 @@ fn run() -> io::Result<()> {
     if driver[1].to_le_bytes() != *b"XC3\0" {
         return Err(io::Error::other("unexpected Ethernet driver"));
     }
-    let mut registers = [0, 0x2c, 0];
-    request(&fd, 0x89f1, &mut registers)?;
-    let pmt = registers[2];
+    if args == ["--test-mac-wake"] {
+        return lan_trial::run(&fd);
+    }
+    let pmt = pmt(&fd)?;
     println!(
-        "pmt={pmt:#010x} power_down={} magic_enabled={} wake_frame_enabled={}",
+        "pmt={pmt:#010x} power_down={} magic_enabled={} wake_frame_enabled={} software_power_down={}",
         pmt & 1 != 0,
         pmt & 2 != 0,
         pmt & 4 != 0,
+        software_power_down(&fd)?,
     );
     Ok(())
 }
