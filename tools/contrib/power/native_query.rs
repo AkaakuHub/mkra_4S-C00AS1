@@ -96,12 +96,9 @@ fn query() -> io::Result<()> {
         src: 655,
         payload: [0; 64],
     };
-    let arguments = ["SdmPvqsDbg", "Get", "0", "0"];
-    wire.payload[..4].copy_from_slice(&4_u32.to_le_bytes());
-    for (index, argument) in arguments.iter().enumerate() {
-        let start = 4 + index * 10;
-        wire.payload[start..start + argument.len()].copy_from_slice(argument.as_bytes());
-    }
+    let command = b"SdmPvqsDbg Get 0 0";
+    wire.payload[..4].copy_from_slice(&1_u32.to_le_bytes());
+    wire.payload[4..4 + command.len()].copy_from_slice(command);
     let captured = console_capture::capture(|| {
         if unsafe { msgsnd(queue, &wire as *const Wire as *const c_void, 92, 0x800) } != 0 {
             return Err(io::Error::last_os_error());
