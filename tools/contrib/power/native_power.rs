@@ -40,10 +40,13 @@ fn download_info() -> io::Result<()> {
     let captured = console_capture::capture(|| {
         native_transport::send(&receiver, native_transport::Request::DownloadInfo)
     })?;
-    if !String::from_utf8_lossy(&captured).contains("Download Information") {
-        return Err(io::Error::other("download diagnostic output was not captured"));
-    }
     fs::write("/tmp/mt/native-download-info.log", &captured)?;
+    if !String::from_utf8_lossy(&captured).contains("Download Information") {
+        return Err(io::Error::other(format!(
+            "download diagnostic output was not captured ({} bytes)",
+            captured.len()
+        )));
+    }
     println!("Download diagnostic captured {} bytes", captured.len());
     Ok(())
 }
