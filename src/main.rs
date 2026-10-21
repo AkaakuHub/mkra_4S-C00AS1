@@ -870,7 +870,7 @@ struct Options {
     no_decode: bool,
     /// serve: put satellite RF into standby after this many idle seconds.
     idle_sleep_secs: u64,
-    mac_wol: bool,
+    mac_wol_idle_secs: u64,
     fem_dev: Option<u32>,
     disconnect: bool,
     reader: Option<u32>,
@@ -965,7 +965,7 @@ impl Options {
             tune_mode: tuner::TUNE_CHANNEL_CHANGE,
             no_decode: false,
             idle_sleep_secs: 0,
-            mac_wol: false,
+            mac_wol_idle_secs: 0,
             fem_dev: None,
             disconnect: false,
             reader: None,
@@ -1035,7 +1035,7 @@ impl Options {
                 "--tune-mode" => o.tune_mode = parse_num(&value()?, a)? as u32,
                 "--no-decode" => o.no_decode = true,
                 "--idle-sleep" => o.idle_sleep_secs = parse_num(&value()?, a)?,
-                "--mac-wol" => o.mac_wol = true,
+                "--mac-wol-idle" => o.mac_wol_idle_secs = parse_num(&value()?, a)?,
                 "--epg-refresh" => o.epg_refresh_secs = parse_num(&value()?, a)? as u64,
                 "--channel-type" => o.channel_type = value()?,
                 "--bs2k" => o.bs2k = true,
@@ -1280,8 +1280,8 @@ fn cmd_serve(opts: &Options) -> i32 {
         eprintln!("mkra: --idle-sleep requires --bs2k");
         return 2;
     }
-    if opts.mac_wol && opts.idle_sleep_secs == 0 {
-        eprintln!("mkra: --mac-wol requires --idle-sleep");
+    if opts.mac_wol_idle_secs > 0 && (!opts.bs2k || opts.idle_sleep_secs > 0) {
+        eprintln!("mkra: --mac-wol-idle requires --bs2k without --idle-sleep");
         return 2;
     }
     let sleeping = if opts.bs2k {
@@ -1663,11 +1663,20 @@ fn cmd_serve(opts: &Options) -> i32 {
     }
 
     if opts.idle_sleep_secs > 0 {
-        if let Err(e) = power::start_idle_task(
+        if let Err(e) = power::start_rf_idle_task(
             Arc::clone(&broker), Duration::from_secs(opts.idle_sleep_secs),
-            resume_required, Arc::clone(&cleanup_failed), opts.mac_wol,
+            resume_required, Arc::clone(&cleanup_failed),
         ) {
             eprintln!("mkra: cannot start idle receiver control: {e}");
+            return 1;
+        }
+    }
+    if opts.mac_wol_idle_secs > 0 {
+        if let Err(e) = power::start_lan_idle_task(
+            Arc::clone(&broker), Duration::from_secs(opts.mac_wol_idle_secs),
+            Arc::clone(&cleanup_failed),
+        ) {
+            eprintln!("mkra: cannot start idle LAN control: {e}");
             return 1;
         }
     }
