@@ -52,9 +52,6 @@ pub const MSG_FED_SET_TUNING_START: u32 = 2;
 /// Legacy TUM -> FEM tuning request (ABS:0x56de14, tuner:0xba64).
 pub const MSG_FEM_LEGACY_TUNING_START: u32 = 0x200d;
 
-/// `msgFemRequestFedCtrlTunerPowerOff` handled by `vFedLocalMain`.
-pub const MSG_FED_TUNER_POWER_OFF: u32 = 0x0D;
-
 /// Local-oscillator frequency of a Japanese BS/CS-110 LNB, in kHz.
 ///
 /// The FEM converts the RF downlink frequency to this intermediate frequency
@@ -459,71 +456,6 @@ impl FedTuneRequest {
     }
 }
 
-/// Power one non-4K FED down through the vendor daemon.
-///
-/// This is the cleanup counterpart of [`FedTuneRequest`]. The product caller
-/// passes the selected `dev` as the fourth argument of `eSysExSendMessage`
-/// (`tuner:0xD19A..0xD1B6` and `0xE528..0xE544`), and the handler at
-/// `tuner:0x13A8E` reads it as the first payload word. Older notes that called
-/// this an empty payload were therefore unsafe.
-#[derive(Debug, Clone, Copy)]
-pub struct FedPowerOffRequest {
-    pub fed_qid: u32,
-    pub path: u32,
-    pub dev: u32,
-}
-
-impl FedPowerOffRequest {
-    /// Construct a BS/CS 2K power-off request.
-    ///
-    /// `path` selects a FED queue, while `dev` selects the physical frontend.
-    /// They are independent axes: the proven Gate 4 sequence assigns dev
-    /// `0x02` to path 2. Never derive one from the other.
-    pub fn isdb_s(path: u32, dev: u32) -> Option<Self> {
-        let idx = usize::try_from(path.checked_sub(1)?).ok()?;
-        Some(FedPowerOffRequest {
-            fed_qid: *FED_NON4K_QIDS.get(idx)?,
-            path,
-            dev,
-        })
-    }
-
-    pub fn validate(&self) -> Result<(), String> {
-        let Some(expected_qid) = self
-            .path
-            .checked_sub(1)
-            .and_then(|i| FED_NON4K_QIDS.get(i as usize))
-            .copied()
-        else {
-            return Err(format!(
-                "power-off path must be 1..4, got {}",
-                self.path
-            ));
-        };
-        if self.fed_qid != expected_qid {
-            return Err(format!(
-                "path {} must target qid {}, got qid {}",
-                self.path, expected_qid, self.fed_qid
-            ));
-        }
-        if !DEV_ISDB_S.contains(&self.dev) {
-            return Err(format!(
-                "dev {:#x} is not a known ISDB-S frontend bit (expected one of {:x?})",
-                self.dev, DEV_ISDB_S
-            ));
-        }
-        Ok(())
-    }
-
-    fn message(&self) -> Result<SysVWire, String> {
-        self.validate()?;
-        let mut m = SysVWire::new(MSG_FED_TUNER_POWER_OFF, 0x10);
-        m.src = self.path;
-        m.put_u32(0, self.dev);
-        Ok(m)
-    }
-}
-
 /// Device bits the FEM understands, as they appear in `aDevOfPath[]`.
 ///
 /// `1` is the "disconnected" marker the FEM writes on DisconnectDevice, not a
@@ -677,32 +609,6 @@ impl Tuner {
         let rc = unsafe { sys::msgsnd(self.msqid,
             &msg as *const SysVWire as *const c_void, MSGSZ, sys::IPC_NOWAIT) };
         if rc < 0 { return Err(io::Error::last_os_error()); }
-        Ok(())
-    }
-
-    /// Ask a non-4K FED to enter RF standby using the product's own message.
-    pub fn power_off_fed(&self, req: &FedPowerOffRequest) -> io::Result<()> {
-        let msg = req
-            .message()
-            .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
-        let rc = unsafe {
-            sys::msgsnd(
-                self.msqid,
-                &msg as *const SysVWire as *const c_void,
-                MSGSZ,
-                sys::IPC_NOWAIT,
-            )
-        };
-        if rc < 0 {
-            let e = io::Error::last_os_error();
-            return Err(io::Error::new(
-                e.kind(),
-                format!(
-                    "msgsnd(msgId 0x0D) to fed qid {} (msqid {}): {e}",
-                    req.fed_qid, self.msqid
-                ),
-            ));
-        }
         Ok(())
     }
 
@@ -948,31 +854,6 @@ mod tests {
         // MHz instead of kHz.
         assert!(FedTuneRequest { rf_khz: 11_727, ..base }.validate().is_err());
         assert!(FedTuneRequest { fed_qid: 999, ..base }.validate().is_err());
-    }
-
-    #[test]
-    fn fed_power_off_carries_dev_in_the_first_payload_word() {
-        // Gate 4's proven ownership pairing: path 2 takes physical dev 0x02.
-        let r = FedPowerOffRequest::isdb_s(2, 0x2).unwrap();
-        assert_eq!(r.fed_qid, FED_NON4K_QIDS[1]);
-        assert_eq!(r.path, 2);
-        assert_eq!(r.dev, 0x2);
-        let m = r.message().unwrap();
-        assert_eq!(m.msg_id, 0x0D);
-        assert_eq!(m.len, 0x10);
-        assert_eq!(m.src, 2);
-        assert_eq!(u32::from_le_bytes(m.payload[0..4].try_into().unwrap()), 0x2);
-        assert!(m.payload[4..].iter().all(|&b| b == 0));
-    }
-
-    #[test]
-    fn fed_power_off_does_not_derive_dev_from_path() {
-        assert!(FedPowerOffRequest::isdb_s(4, 0x2).unwrap().validate().is_ok());
-        assert!(FedPowerOffRequest::isdb_s(2, 0x4).unwrap().validate().is_ok());
-        assert!(FedPowerOffRequest::isdb_s(2, 0x200)
-            .unwrap()
-            .validate()
-            .is_err());
     }
 
     #[test]

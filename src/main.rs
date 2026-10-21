@@ -105,7 +105,6 @@ USAGE:
   mkra peek  --phys <addr> [--len <n>]
   mkra tune  --freq <kHz> [--tsid <hex>] [--tuner-no <1..3>] [--input-port <n>]
   mkra tune  --fed <adbs|isdb-s> --freq <kHz> [--path <n>] [--tsid <hex>] [--dry-run]
-  mkra fed-off --path <1..4> --dev <0x2|0x4|0x8> [--dry-run]
   mkra fem-dev --path <1..6> (--dev <hex> | --disconnect) [--dry-run]
   mkra cpld --reg <0..4> [--set <hex> --expect <hex>]
   mkra tsrec --out <path> [--seconds <n>] [--tsi-port <n>]
@@ -160,9 +159,6 @@ SERVE OPTIONS:
   --max-clients <n>     concurrent stream clients      (default 4)
   --tune                let mkra change the box's channel when a client asks
                         for a service it is not showing (default: off)
-  --idle-sleep <sec>    with --bs2k: put satellite RF into standby after this
-                        many idle seconds; the next stream retunes (default 0).
-                        The receiver API and Linux remain running.
   --tuner-no <1..3>     which frontend to tune         (default 1)
   --input-port <n>      inputPortNo, must be >= 100    (default 101)
   --reply-qid <n>       product-internal reply queue   (default 0; unused, see DESIGN.md §6.2)
@@ -378,7 +374,6 @@ fn main() {
         "graph" => cmd_graph(&opts),
         "peek" => cmd_peek(&opts),
         "tune" => cmd_tune(&opts),
-        "fed-off" => cmd_fed_off(&opts),
         "fem-dev" => cmd_fem_dev(&opts),
         "cpld" => cmd_cpld(&opts),
         "tsrec" => cmd_tsrec(&opts),
@@ -868,8 +863,6 @@ struct Options {
     tune_mode: u32,
     /// tune4k: set the `NotDecode` word.
     no_decode: bool,
-    /// serve: put satellite RF into standby after this many idle seconds.
-    idle_sleep_secs: u64,
     mac_wol_idle_secs: u64,
     fem_dev: Option<u32>,
     disconnect: bool,
@@ -964,7 +957,6 @@ impl Options {
             oid: 32,
             tune_mode: tuner::TUNE_CHANNEL_CHANGE,
             no_decode: false,
-            idle_sleep_secs: 0,
             mac_wol_idle_secs: 0,
             fem_dev: None,
             disconnect: false,
@@ -1034,7 +1026,6 @@ impl Options {
                 "--oid" => o.oid = parse_num(&value()?, a)? as u32,
                 "--tune-mode" => o.tune_mode = parse_num(&value()?, a)? as u32,
                 "--no-decode" => o.no_decode = true,
-                "--idle-sleep" => o.idle_sleep_secs = parse_num(&value()?, a)?,
                 "--mac-wol-idle" => o.mac_wol_idle_secs = parse_num(&value()?, a)?,
                 "--epg-refresh" => o.epg_refresh_secs = parse_num(&value()?, a)? as u64,
                 "--channel-type" => o.channel_type = value()?,
@@ -1276,12 +1267,8 @@ fn cmd_serve(opts: &Options) -> i32 {
         Some(file)
     }else {None};
 
-    if opts.idle_sleep_secs > 0 && !opts.bs2k {
-        eprintln!("mkra: --idle-sleep requires --bs2k");
-        return 2;
-    }
-    if opts.mac_wol_idle_secs > 0 && (!opts.bs2k || opts.idle_sleep_secs > 0) {
-        eprintln!("mkra: --mac-wol-idle requires --bs2k without --idle-sleep");
+    if opts.mac_wol_idle_secs > 0 && !opts.bs2k {
+        eprintln!("mkra: --mac-wol-idle requires --bs2k");
         return 2;
     }
     let sleeping = if opts.bs2k {
@@ -1667,15 +1654,6 @@ fn cmd_serve(opts: &Options) -> i32 {
         }
     }
 
-    if opts.idle_sleep_secs > 0 {
-        if let Err(e) = power::start_rf_idle_task(
-            Arc::clone(&broker), Duration::from_secs(opts.idle_sleep_secs),
-            resume_required, Arc::clone(&cleanup_failed),
-        ) {
-            eprintln!("mkra: cannot start idle receiver control: {e}");
-            return 1;
-        }
-    }
     if opts.mac_wol_idle_secs > 0 {
         if let Err(e) = power::start_lan_idle_task(
             Arc::clone(&broker), Duration::from_secs(opts.mac_wol_idle_secs),
@@ -4689,51 +4667,6 @@ fn cmd_fem_dev(opts: &Options) -> i32 {
     match t.set_device(&req) {
         Ok(()) => {
             println!("posted to FEM msqid {}", t.msqid());
-            0
-        }
-        Err(e) => {
-            eprintln!("mkra: failed: {e}");
-            1
-        }
-    }
-}
-
-/// Put one BS/CS 2K frontend into RF standby through its vendor FED task.
-fn cmd_fed_off(opts: &Options) -> i32 {
-    let Some(path) = opts.path else {
-        eprintln!("mkra: fed-off needs --path <1..4>");
-        return 2;
-    };
-    let Some(dev) = opts.fem_dev else {
-        eprintln!("mkra: fed-off needs the captured device bit via --dev <0x2|0x4|0x8>");
-        return 2;
-    };
-    let Some(req) = tuner::FedPowerOffRequest::isdb_s(path, dev) else {
-        eprintln!("mkra: --path {path} is not one of the four non-4K FED queues");
-        return 2;
-    };
-    if let Err(e) = req.validate() {
-        eprintln!("mkra: {e}");
-        return 2;
-    }
-    println!(
-        "FED tuner power off: qid {} path {} dev {:#x} msgId 0x0D payload[0]={:#x}",
-        req.fed_qid, req.path, req.dev, req.dev
-    );
-    if opts.dry_run {
-        println!("--dry-run: nothing was sent.");
-        return 0;
-    }
-    let t = match tuner::Tuner::open_qid(req.fed_qid, tuner::MSGH_LIST) {
-        Ok(t) => t,
-        Err(e) => {
-            eprintln!("mkra: queue for qid {} unavailable: {e}", req.fed_qid);
-            return 1;
-        }
-    };
-    match t.power_off_fed(&req) {
-        Ok(()) => {
-            println!("posted msgId 0x0D to msqid {}", t.msqid());
             0
         }
         Err(e) => {
