@@ -81,7 +81,7 @@ fn receiver_queue() -> io::Result<c_int> {
     Ok(queue)
 }
 
-fn query() -> io::Result<()> {
+fn query(describe: bool) -> io::Result<()> {
     if std::mem::size_of::<Wire>() != 96 {
         return Err(io::Error::other("requires ARM32 wire layout"));
     }
@@ -91,12 +91,16 @@ fn query() -> io::Result<()> {
         unused: [0; 2],
         self_ptr: 0,
         inner: 0,
-        msg_id: 0x80000,
+        msg_id: if describe { 0x80001 } else { 0x80000 },
         len: 56,
         src: 655,
         payload: [0; 64],
     };
-    let command = b"SdmPvqsDbg Get 0 0";
+    let command: &[u8] = if describe {
+        b"SdmPvqsDbg"
+    } else {
+        b"SdmPvqsDbg \"Get\" 0 0"
+    };
     wire.payload[..4].copy_from_slice(&1_u32.to_le_bytes());
     wire.payload[4..4 + command.len()].copy_from_slice(command);
     let captured = console_capture::capture(|| {
@@ -115,12 +119,16 @@ fn query() -> io::Result<()> {
     let output = String::from_utf8_lossy(&captured);
     for line in output.lines().filter(|line| {
         line.contains("SdmPvqsDbg")
+            || line.contains("SDM PVQS")
             || line.contains("usTimeToStep2=")
             || line.contains("usFlashMagic=")
     }) {
         println!("{line}");
     }
-    if !output.contains("SdmPvqsDbg cmd=\"Get\",ret=1") {
+    if describe && !output.contains("SDM PVQS Dbg Command") {
+        return Err(io::Error::other("native command is not registered"));
+    }
+    if !describe && !output.contains("SdmPvqsDbg cmd=\"Get\",ret=1") {
         return Err(io::Error::other("native Get response was not captured"));
     }
     Ok(())
@@ -129,11 +137,15 @@ fn query() -> io::Result<()> {
 fn main() {
     let args: Vec<_> = std::env::args().skip(1).collect();
     let result = if args.is_empty() {
-        query()
+        query(false)
+    } else if args == ["--describe"] {
+        query(true)
     } else if args == ["--restore-console"] {
         console_capture::restore()
     } else {
-        Err(io::Error::other("usage: native_query [--restore-console]"))
+        Err(io::Error::other(
+            "usage: native_query [--describe | --restore-console]",
+        ))
     };
     if let Err(error) = result {
         eprintln!("native power query: {error}");
