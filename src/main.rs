@@ -1639,16 +1639,21 @@ fn cmd_serve(opts: &Options) -> i32 {
                     .stack_size(256 * 1024)
                     .spawn(move || {
                         let reader = graph::ObjReader::new(Arc::clone(&drv));
+                        let mut last_idle_chunks = None;
                         loop {
                             match scrape_section_rings(&reader) {
                                 Ok(chunks) if !chunks.is_empty() => {
-                                    let (n, total) = tap_state.merge_ring_si(&chunks);
-                                    if n > 0 {
-                                        eprintln!(
-                                            "mkra: EPG tap: +{n} sections from {} ring(s), {total} programs",
-                                            chunks.len()
-                                        );
+                                    let idle = tap_state.broker.current().is_none();
+                                    if !idle || last_idle_chunks.as_ref() != Some(&chunks) {
+                                        let (n, total) = tap_state.merge_ring_si(&chunks);
+                                        if n > 0 {
+                                            eprintln!(
+                                                "mkra: EPG tap: +{n} sections from {} ring(s), {total} programs",
+                                                chunks.len()
+                                            );
+                                        }
                                     }
+                                    last_idle_chunks = idle.then_some(chunks);
                                 }
                                 Ok(_) => eprintln!("mkra: EPG tap: no readable section ring"),
                                 Err(e) => eprintln!("mkra: EPG tap failed: {e}"),
