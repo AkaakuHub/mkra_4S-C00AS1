@@ -6,6 +6,7 @@ die "usage: keep_awake.pl [--once]\n" if @ARGV && !$once;
 my $firmware = '1a3fdfa8379d75a802190b48ea951e9a';
 my $quick_start = 0x0190acfc;
 my $auto_off = 0x0190ac24;
+my $verified_process;
 
 sub read_at {
     my ($fh, $address, $length) = @_;
@@ -50,7 +51,13 @@ sub verify_binary {
 
 while (1) {
     my ($pid) = process_state();
-    verify_binary("/proc/$pid/exe", $firmware);
+    my $executable = "/proc/$pid/exe";
+    my @identity = stat($executable) or die "stat executable: $!\n";
+    my $identity = join ':', $pid, @identity[0, 1, 7, 9, 10];
+    if (!defined($verified_process) || $verified_process ne $identity) {
+        verify_binary($executable, $firmware);
+        $verified_process = $identity;
+    }
 
     open(my $mem, '+<', "/proc/$pid/mem") or die "mem: $!\n";
     my $config = read_at($mem, $quick_start, 20);
