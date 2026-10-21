@@ -1,13 +1,9 @@
 #!/usr/bin/perl
-$| = 1;
-my $once = @ARGV == 1 && $ARGV[0] eq '--once';
-die "usage: keep_awake.pl [--once]\n" if @ARGV && !$once;
+die "usage: keep_awake.pl\n" if @ARGV;
 
 my $firmware = '1a3fdfa8379d75a802190b48ea951e9a';
 my $quick_start = 0x0190acfc;
 my $auto_off = 0x0190ac24;
-my $verified_process;
-
 sub read_at {
     my ($fh, $address, $length) = @_;
     defined(sysseek($fh, $address, 0)) or die "seek: $!\n";
@@ -49,34 +45,23 @@ sub verify_binary {
         or die "unexpected binary: $path\n";
 }
 
-while (1) {
-    my ($pid) = process_state();
-    my $executable = "/proc/$pid/exe";
-    my @identity = stat($executable) or die "stat executable: $!\n";
-    my $identity = join ':', $pid, @identity[0, 1, 7, 9, 10];
-    if (!defined($verified_process) || $verified_process ne $identity) {
-        verify_binary($executable, $firmware);
-        $verified_process = $identity;
-    }
-
-    open(my $mem, '+<', "/proc/$pid/mem") or die "mem: $!\n";
-    my $config = read_at($mem, $quick_start, 20);
-    my ($minutes, $type) = unpack 'vv', $config;
-    ($minutes <= 1440 || $minutes == 0xffff) && $type <= 2
-        or die "unexpected quick-start configuration\n";
-    my $off = unpack 'V', read_at($mem, $auto_off, 4);
-    $off <= 1 or die "unexpected auto-off configuration\n";
-    write_at($mem, $quick_start, pack('vv', 0xffff, 0))
-        if $minutes != 0xffff || $type != 0;
-    write_at($mem, $auto_off, pack('V', 0)) if $off != 0;
-    my $after = read_at($mem, $quick_start, 20);
-    $after eq pack('vv', 0xffff, 0) . substr($config, 4)
-        or die "quick-start verification failed\n";
-    unpack('V', read_at($mem, $auto_off, 4)) == 0
-        or die "auto-off verification failed\n";
-    close $mem or die "close: $!\n";
-    printf "%d pid=%d quick_start=always auto_off=disabled previous=%u,%u,%u\n",
-        time, $pid, $minutes, $type, $off;
-    last if $once;
-    sleep 30;
-}
+my $pid = process_state();
+verify_binary("/proc/$pid/exe", $firmware);
+open(my $mem, '+<', "/proc/$pid/mem") or die "mem: $!\n";
+my $config = read_at($mem, $quick_start, 20);
+my ($minutes, $type) = unpack 'vv', $config;
+($minutes <= 1440 || $minutes == 0xffff) && $type <= 2
+    or die "unexpected quick-start configuration\n";
+my $off = unpack 'V', read_at($mem, $auto_off, 4);
+$off <= 1 or die "unexpected auto-off configuration\n";
+write_at($mem, $quick_start, pack('vv', 0xffff, 0))
+    if $minutes != 0xffff || $type != 0;
+write_at($mem, $auto_off, pack('V', 0)) if $off != 0;
+my $after = read_at($mem, $quick_start, 20);
+$after eq pack('vv', 0xffff, 0) . substr($config, 4)
+    or die "quick-start verification failed\n";
+unpack('V', read_at($mem, $auto_off, 4)) == 0
+    or die "auto-off verification failed\n";
+close $mem or die "close: $!\n";
+printf "%d pid=%d quick_start=always auto_off=disabled previous=%u,%u,%u\n",
+    time, $pid, $minutes, $type, $off;
