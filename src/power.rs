@@ -9,25 +9,78 @@ use std::{
     time::{Duration, Instant},
 };
 
+mod lan;
+
 pub fn start_idle_task(
     broker: Arc<Broker>,
     delay: Duration,
     resume_required: Arc<AtomicBool>,
     cleanup_failed: Arc<AtomicBool>,
+    mac_wol: bool,
 ) -> io::Result<()> {
+    let lan = if mac_wol {
+        Some(lan::Lan::open()?)
+    } else {
+        None
+    };
     thread::Builder::new()
         .name("mkra-idle".into())
-        .spawn(move || loop {
-            thread::sleep(Duration::from_secs(1));
-            if resume_required.load(Ordering::SeqCst) || cleanup_failed.load(Ordering::SeqCst) {
-                continue;
-            }
-            let result = broker.run_when_idle(delay, || {
-                resume_required.store(true, Ordering::SeqCst);
-                sleep_receiver()
-            });
-            if let Err(e) = result {
-                eprintln!("mkra: idle receiver sleep failed: {e}; next stream will retune");
+        .spawn(move || {
+            let mut rf_asleep = resume_required.load(Ordering::SeqCst);
+            let mut mac_asleep = false;
+            let mut mac_wake_at = Instant::now();
+            loop {
+                thread::sleep(Duration::from_secs(1));
+                if cleanup_failed.load(Ordering::SeqCst) {
+                    continue;
+                }
+                if !resume_required.load(Ordering::SeqCst) {
+                    rf_asleep = false;
+                    mac_asleep = false;
+                }
+                if mac_asleep {
+                    let Some(device) = &lan else { continue };
+                    match device.software_power_down() {
+                        Ok(true) => continue,
+                        Ok(false) => {
+                            mac_asleep = false;
+                            mac_wake_at = Instant::now();
+                            eprintln!("mkra: LAN restored by wake packet");
+                        }
+                        Err(error) => {
+                            eprintln!("mkra: cannot read LAN power state: {error}");
+                            continue;
+                        }
+                    }
+                }
+                if resume_required.load(Ordering::SeqCst) && (!rf_asleep || lan.is_none()) {
+                    continue;
+                }
+                if mac_wake_at.elapsed() < delay {
+                    continue;
+                }
+                let result = broker.run_when_idle(delay, || {
+                    if let Some(device) = &lan {
+                        if device.clients_connected()? {
+                            return Ok(());
+                        }
+                    }
+                    if !rf_asleep {
+                        resume_required.store(true, Ordering::SeqCst);
+                        sleep_receiver()?;
+                        rf_asleep = true;
+                    }
+                    if let Some(device) = &lan {
+                        device.standby()?;
+                        mac_asleep = true;
+                        eprintln!("mkra: LAN entered magic-packet standby");
+                    }
+                    Ok(())
+                });
+                if let Err(e) = result {
+                    mac_wake_at = Instant::now();
+                    eprintln!("mkra: idle receiver sleep failed: {e}; next stream will retune");
+                }
             }
         })
         .map(|_| ())
