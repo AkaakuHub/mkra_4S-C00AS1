@@ -85,11 +85,17 @@ impl Lan {
     }
 
     pub fn clients_connected(&self) -> io::Result<bool> {
-        let sockets = fs::read_to_string("/proc/net/tcp")?;
-        Ok(sockets
-            .lines()
-            .skip(1)
-            .any(|line| line.split_whitespace().nth(3) == Some("01")))
+        for path in ["/proc/net/tcp", "/proc/net/tcp6"] {
+            let sockets = fs::read_to_string(path)?;
+            if sockets
+                .lines()
+                .skip(1)
+                .any(|line| line.split_whitespace().nth(3) == Some("01"))
+            {
+                return Ok(true);
+            }
+        }
+        Ok(false)
     }
 
     pub fn standby(&self) -> io::Result<()> {
