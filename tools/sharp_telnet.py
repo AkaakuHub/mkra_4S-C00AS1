@@ -324,6 +324,8 @@ class SharpTelnet:
                 self.send(user + "\n"); got_login = True; self.buf = b""; continue
             if b"password:" in low:
                 self.send((password or "") + "\n"); self.buf = b""; continue
+            if not got_login and self.buf.endswith(b"/ # "):
+                break
             if got_login and (b"#" in self.buf or b"$" in self.buf):
                 break
             if not got_login and time.time() > deadline - self.timeout + 5:
