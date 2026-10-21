@@ -90,6 +90,8 @@ pub struct Receiver {
 pub enum Request {
     Description,
     SaveQuickStart,
+    DownloadDescription,
+    DownloadInfo,
 }
 
 pub fn send(receiver: &Receiver, request: Request) -> io::Result<()> {
@@ -102,15 +104,22 @@ pub fn send(receiver: &Receiver, request: Request) -> io::Result<()> {
         self_ptr: 0,
         inner: 0,
         msg_id: match request {
-            Request::Description => 0x80001,
-            Request::SaveQuickStart => 0x80000,
+            Request::Description | Request::DownloadDescription => 0x80001,
+            Request::SaveQuickStart | Request::DownloadInfo => 0x80000,
         },
         len: 56,
         src: 655,
         payload: [0; 64],
     };
     wire.payload[..4].copy_from_slice(&1_u32.to_le_bytes());
-    wire.payload[4..12].copy_from_slice(b"QuickOff");
+    match request {
+        Request::Description | Request::SaveQuickStart => {
+            wire.payload[4..12].copy_from_slice(b"QuickOff");
+        }
+        Request::DownloadDescription | Request::DownloadInfo => {
+            wire.payload[4..16].copy_from_slice(b"DlmPrintInfo");
+        }
+    }
     if unsafe {
         msgsnd(
             receiver.queue,

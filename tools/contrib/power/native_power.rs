@@ -29,17 +29,38 @@ fn query() -> io::Result<()> {
     Ok(())
 }
 
+fn download_info() -> io::Result<()> {
+    let receiver = native_transport::receiver()?;
+    let description = console_capture::capture(|| {
+        native_transport::send(&receiver, native_transport::Request::DownloadDescription)
+    })?;
+    if !String::from_utf8_lossy(&description).contains("func. eDlmPrintInfo") {
+        return Err(io::Error::other("download diagnostic registration was not verified"));
+    }
+    let captured = console_capture::capture(|| {
+        native_transport::send(&receiver, native_transport::Request::DownloadInfo)
+    })?;
+    if !String::from_utf8_lossy(&captured).contains("Download Information") {
+        return Err(io::Error::other("download diagnostic output was not captured"));
+    }
+    fs::write("/tmp/mt/native-download-info.log", &captured)?;
+    println!("Download diagnostic captured {} bytes", captured.len());
+    Ok(())
+}
+
 fn main() {
     let args: Vec<_> = std::env::args().skip(1).collect();
     let result = if args == ["--describe"] {
         query()
+    } else if args == ["--download-info"] {
+        download_info()
     } else if args == ["--save-quick-start"] {
         save_quick_start::run()
     } else if args == ["--restore-console"] {
         console_capture::restore()
     } else {
         Err(io::Error::other(
-            "usage: native_power --describe | --save-quick-start | --restore-console",
+            "usage: native_power --describe | --download-info | --save-quick-start | --restore-console",
         ))
     };
     if let Err(error) = result {
