@@ -1,10 +1,6 @@
-mod console_capture;
-
 use std::ffi::{c_int, c_void};
 use std::fs;
 use std::io;
-use std::io::Write;
-use std::os::unix::fs::OpenOptionsExt;
 use std::process::Command;
 
 #[repr(C)]
@@ -23,7 +19,7 @@ unsafe extern "C" {
     fn msgsnd(msqid: c_int, msgp: *const c_void, msgsz: usize, msgflg: c_int) -> c_int;
 }
 
-fn receiver_queue() -> io::Result<c_int> {
+pub fn receiver() -> io::Result<Receiver> {
     let processes: Vec<_> = fs::read_dir("/proc")?
         .filter_map(Result::ok)
         .filter(|entry| {
@@ -78,63 +74,53 @@ fn receiver_queue() -> io::Result<c_int> {
             "expected one abs thread waiting on native debug queue",
         ));
     }
-    Ok(queue)
+    let pid = processes[0]
+        .file_name()
+        .to_string_lossy()
+        .parse()
+        .map_err(io::Error::other)?;
+    Ok(Receiver { pid, queue })
 }
 
-fn query() -> io::Result<()> {
+pub struct Receiver {
+    pub pid: u32,
+    queue: c_int,
+}
+
+pub enum Request {
+    Description,
+    SaveQuickStart,
+}
+
+pub fn send(receiver: &Receiver, request: Request) -> io::Result<()> {
     if std::mem::size_of::<Wire>() != 96 {
         return Err(io::Error::other("requires ARM32 wire layout"));
     }
-    let queue = receiver_queue()?;
     let mut wire = Wire {
         mtype: 1,
         unused: [0; 2],
         self_ptr: 0,
         inner: 0,
-        msg_id: 0x80001,
+        msg_id: match request {
+            Request::Description => 0x80001,
+            Request::SaveQuickStart => 0x80000,
+        },
         len: 56,
         src: 655,
         payload: [0; 64],
     };
-    let command = b"QuickOff";
     wire.payload[..4].copy_from_slice(&1_u32.to_le_bytes());
-    wire.payload[4..4 + command.len()].copy_from_slice(command);
-    let captured = console_capture::capture(|| {
-        if unsafe { msgsnd(queue, &wire as *const Wire as *const c_void, 92, 0x800) } != 0 {
-            return Err(io::Error::last_os_error());
-        }
-        Ok(())
-    })?;
-    fs::OpenOptions::new()
-        .write(true)
-        .create(true)
-        .truncate(true)
-        .mode(0o600)
-        .open("/tmp/mt/native-query-console.log")?
-        .write_all(&captured)?;
-    let output = String::from_utf8_lossy(&captured);
-    if !output.lines().any(|line| line.trim() == "no param") {
-        return Err(io::Error::other(
-            "native command description was not captured",
-        ));
+    wire.payload[4..12].copy_from_slice(b"QuickOff");
+    if unsafe {
+        msgsnd(
+            receiver.queue,
+            &wire as *const Wire as *const c_void,
+            92,
+            0x800,
+        )
+    } != 0
+    {
+        return Err(io::Error::last_os_error());
     }
-    println!("QuickOff: native command is registered (description only; not executed)");
     Ok(())
-}
-
-fn main() {
-    let args: Vec<_> = std::env::args().skip(1).collect();
-    let result = if args.is_empty() {
-        query()
-    } else if args == ["--restore-console"] {
-        console_capture::restore()
-    } else {
-        Err(io::Error::other(
-            "usage: native_command_info [--restore-console]",
-        ))
-    };
-    if let Err(error) = result {
-        eprintln!("native power query: {error}");
-        std::process::exit(1);
-    }
 }
