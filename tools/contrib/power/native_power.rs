@@ -41,7 +41,7 @@ fn download_info() -> io::Result<()> {
         native_transport::send(&receiver, native_transport::Request::DownloadInfo)
     })?;
     fs::write("/tmp/mt/native-download-info.log", &captured)?;
-    if !String::from_utf8_lossy(&captured).contains("Download Information") {
+    if !String::from_utf8_lossy(&captured).contains("tDownloadStatus.eFlag") {
         return Err(io::Error::other(format!(
             "download diagnostic output was not captured ({} bytes)",
             captured.len()
