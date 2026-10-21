@@ -89,7 +89,7 @@ pub fn start_lan_idle_task(
 pub fn status() -> io::Result<()> {
     let registers = gr_i2c::satellite_rf_registers()?;
     println!(
-        "Satellite RF standby: {}",
+        "Satellite RF standby snapshot match: {}",
         registers == gr_i2c::SATELLITE_STANDBY_REGS
     );
     for (reg, value) in registers {
