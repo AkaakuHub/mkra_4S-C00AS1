@@ -101,7 +101,15 @@ static int recovery(void *unused)
 
         if (remaining > 0 &&
             __sync_bool_compare_and_swap(&ticks, remaining, remaining - 1) &&
-            remaining == 1) {
+            remaining == 120) {
+            u32 *descriptor = irq_to_desc(83);
+            u32 *action = *(u32 **)((char *)descriptor + 0x30);
+
+            printk("\0014as1_diag: timed freeze wake; IRQ83 flags=%08x state=%08x depth=%u\n",
+                   action[7], descriptor[14], descriptor[15]);
+            freeze_wake();
+        } else if (remaining == 1 &&
+                   __sync_bool_compare_and_swap(&ticks, 1, 0)) {
             struct task_prefix *task = __sync_lock_test_and_set(&owner, 0);
 
             printk("\0013as1_diag: deadline reached; suspend caller follows\n");
