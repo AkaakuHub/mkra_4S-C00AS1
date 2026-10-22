@@ -7,7 +7,7 @@ CFLAGS := -Os -Wall -Wextra -Werror -std=gnu11 -ffreestanding -fno-builtin \
     -fno-asynchronous-unwind-tables -marm -march=armv7-a -mfloat-abi=soft
 
 .PHONY: all clean
-all: $(BUILD_DIR)/as1_freezer.ko
+all: $(BUILD_DIR)/as1_freezer.ko $(BUILD_DIR)/as1_diag.ko
 
 $(BUILD_DIR):
 	mkdir -p $@
@@ -21,5 +21,15 @@ $(BUILD_DIR)/module.o: module.S | $(BUILD_DIR)
 $(BUILD_DIR)/as1_freezer.ko: $(BUILD_DIR)/freezer.o $(BUILD_DIR)/module.o
 	$(LD) -r $^ -o $@
 
+$(BUILD_DIR)/diag.o: diag.c network_abi.h target_abi.h | $(BUILD_DIR)
+	$(CC) $(CFLAGS) -c $< -o $@
+
+$(BUILD_DIR)/diag_module.o: module.S | $(BUILD_DIR)
+	$(CC) $(CFLAGS) -DAS1_MODULE_NAME='"as1_diag"' -c $< -o $@
+
+$(BUILD_DIR)/as1_diag.ko: $(BUILD_DIR)/diag.o $(BUILD_DIR)/diag_module.o
+	$(LD) -r $^ -o $@
+
 clean:
-	rm -f $(BUILD_DIR)/freezer.o $(BUILD_DIR)/module.o $(BUILD_DIR)/as1_freezer.ko
+	rm -f $(BUILD_DIR)/freezer.o $(BUILD_DIR)/module.o $(BUILD_DIR)/as1_freezer.ko \
+	    $(BUILD_DIR)/diag.o $(BUILD_DIR)/diag_module.o $(BUILD_DIR)/as1_diag.ko
