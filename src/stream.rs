@@ -14,6 +14,7 @@ use std::time::{Duration, Instant};
 use crate::tssrc::TsSource;
 
 pub const TS_PACKET: usize = 188;
+pub const DEFAULT_RING_BYTES: usize = 6 * 1024 * 1024;
 
 /// Smallest per-client ring we will honour. Anything below a few packets makes
 /// the drop counter meaningless and starves the writer thread.
@@ -331,7 +332,7 @@ pub struct BrokerConfig {
 impl Default for BrokerConfig {
     fn default() -> Self {
         BrokerConfig {
-            ring_bytes: 1024 * 1024, // ~250 ms at the 32 Mbit/s advanced-BS rate
+            ring_bytes: DEFAULT_RING_BYTES,
             max_clients: 4,
             linger: Duration::from_secs(3),
             switch_grace: Duration::from_secs(2),

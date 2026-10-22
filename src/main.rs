@@ -64,7 +64,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use channels::ChannelTable;
-use stream::{Broker, BrokerConfig};
+use stream::{Broker, BrokerConfig, DEFAULT_RING_BYTES};
 use tssrc::{FileSource, NullSource, PassiveRingSource, TsSource};
 use xcdrv::XcDrv;
 
@@ -153,9 +153,8 @@ SERVE OPTIONS:
   --epg-refresh <sec>   re-read/re-scan every n seconds (default 300)
   --channel-type <t>    Mirakurun ChannelType to report (default BS).
                         Use BS4K for Mirakurun-BS4K / DMirakurun clients.
-  --ring <bytes>        per-client buffer              (default 2097152,
-                        about 0.55 s of 4K). Bigger survives network hiccups,
-                        smaller cuts live latency; drops are packet-aligned
+  --ring <bytes>        per-client buffer              (default 6291456).
+                        Drops are packet-aligned
   --max-clients <n>     concurrent stream clients      (default 4)
   --tune                let mkra change the box's channel when a client asks
                         for a service it is not showing (default: off)
@@ -905,7 +904,7 @@ impl Options {
             isdbs_channels: None,
             test_pattern: false,
             test_bitrate: 8_000_000,
-            ring: 2 * 1024 * 1024,
+            ring: DEFAULT_RING_BYTES,
             max_clients: 4,
             tune: false,
             tuner_no: 1,
@@ -3959,7 +3958,7 @@ mod tests {
         assert_eq!(o.command, "serve");
         assert_eq!(o.port, 40772);
         assert_eq!(o.max_clients, 4);
-        assert_eq!(o.ring, 2 * 1024 * 1024);
+        assert_eq!(o.ring, DEFAULT_RING_BYTES);
         // Tuning must never be on unless asked for.
         assert!(!o.tune);
         assert!(o.buffer.is_none());
