@@ -11,51 +11,55 @@ use std::{
 
 mod lan;
 
-pub fn start_lan_idle_task(
+pub fn start_idle_task(
     broker: Arc<Broker>,
     delay: Duration,
     cleanup_failed: Arc<AtomicBool>,
 ) -> io::Result<()> {
     let device = lan::Lan::open()?;
+    for module in ["freezer", "display", "wake", "lan", "front", "mmc"] {
+        let stats = std::fs::read_to_string(format!(
+            "/sys/module/as1_{module}/parameters/stats"
+        ))?;
+        if !stats.split_whitespace().any(|field| field == "enabled=1") {
+            return Err(io::Error::other(format!("as1_{module} is disabled")));
+        }
+    }
+    if std::fs::read_to_string("/sys/power/pm_test")?.trim()
+        != "[none] core processors platform devices freezer"
+    {
+        return Err(io::Error::other("power diagnostics are enabled"));
+    }
+    if std::fs::read_to_string("/sys/module/printk/parameters/console_suspend")?.trim() != "N" {
+        return Err(io::Error::other("native MCU UART must stay enabled"));
+    }
+    std::fs::write("/sys/module/as1_codec/parameters/bypass", b"1")?;
     thread::Builder::new()
-        .name("mkra-lan-idle".into())
+        .name("mkra-wol-idle".into())
         .spawn(move || {
-            let mut mac_asleep = false;
-            let mut mac_wake_at = Instant::now();
+            let mut wake_at = Instant::now();
             loop {
                 thread::sleep(Duration::from_secs(1));
                 if cleanup_failed.load(Ordering::SeqCst) {
                     continue;
                 }
-                if mac_asleep {
-                    match device.software_power_down() {
-                        Ok(true) => continue,
-                        Ok(false) => {
-                            mac_asleep = false;
-                            mac_wake_at = Instant::now();
-                            eprintln!("mkra: LAN restored by wake packet");
-                        }
-                        Err(error) => {
-                            eprintln!("mkra: cannot read LAN power state: {error}");
-                            continue;
-                        }
-                    }
-                }
-                if mac_wake_at.elapsed() < delay {
+                if wake_at.elapsed() < delay {
                     continue;
                 }
                 let result = broker.run_when_idle(delay, || {
                     if device.clients_connected()? {
                         return Ok(());
                     }
-                    device.standby()?;
-                    mac_asleep = true;
-                    eprintln!("mkra: LAN entered magic-packet standby");
+                    eprintln!("mkra: entering body standby; waiting for magic packet");
+                    let result = std::fs::write("/sys/power/state", b"freeze");
+                    wake_at = Instant::now();
+                    result?;
+                    eprintln!("mkra: body resumed from standby");
                     Ok(())
                 });
                 if let Err(e) = result {
-                    mac_wake_at = Instant::now();
-                    eprintln!("mkra: idle LAN standby failed: {e}");
+                    wake_at = Instant::now();
+                    eprintln!("mkra: idle body standby failed: {e}");
                 }
             }
         })

@@ -862,7 +862,7 @@ struct Options {
     tune_mode: u32,
     /// tune4k: set the `NotDecode` word.
     no_decode: bool,
-    mac_wol_idle_secs: u64,
+    wol_idle_secs: u64,
     fem_dev: Option<u32>,
     disconnect: bool,
     reader: Option<u32>,
@@ -956,7 +956,7 @@ impl Options {
             oid: 32,
             tune_mode: tuner::TUNE_CHANNEL_CHANGE,
             no_decode: false,
-            mac_wol_idle_secs: 0,
+            wol_idle_secs: 0,
             fem_dev: None,
             disconnect: false,
             reader: None,
@@ -1025,7 +1025,7 @@ impl Options {
                 "--oid" => o.oid = parse_num(&value()?, a)? as u32,
                 "--tune-mode" => o.tune_mode = parse_num(&value()?, a)? as u32,
                 "--no-decode" => o.no_decode = true,
-                "--mac-wol-idle" => o.mac_wol_idle_secs = parse_num(&value()?, a)?,
+                "--wol-idle" => o.wol_idle_secs = parse_num(&value()?, a)?,
                 "--epg-refresh" => o.epg_refresh_secs = parse_num(&value()?, a)? as u64,
                 "--channel-type" => o.channel_type = value()?,
                 "--bs2k" => o.bs2k = true,
@@ -1266,8 +1266,8 @@ fn cmd_serve(opts: &Options) -> i32 {
         Some(file)
     }else {None};
 
-    if opts.mac_wol_idle_secs > 0 && !opts.bs2k {
-        eprintln!("mkra: --mac-wol-idle requires --bs2k");
+    if opts.wol_idle_secs > 0 && !opts.bs2k {
+        eprintln!("mkra: --wol-idle requires --bs2k");
         return 2;
     }
     let sleeping = if opts.bs2k {
@@ -1653,12 +1653,12 @@ fn cmd_serve(opts: &Options) -> i32 {
         }
     }
 
-    if opts.mac_wol_idle_secs > 0 {
-        if let Err(e) = power::start_lan_idle_task(
-            Arc::clone(&broker), Duration::from_secs(opts.mac_wol_idle_secs),
+    if opts.wol_idle_secs > 0 {
+        if let Err(e) = power::start_idle_task(
+            Arc::clone(&broker), Duration::from_secs(opts.wol_idle_secs),
             Arc::clone(&cleanup_failed),
         ) {
-            eprintln!("mkra: cannot start idle LAN control: {e}");
+            eprintln!("mkra: cannot start idle body control: {e}");
             return 1;
         }
     }
