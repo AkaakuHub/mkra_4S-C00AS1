@@ -1,10 +1,6 @@
 #!/usr/bin/perl
-use strict;
-use warnings;
-use Fcntl qw(O_WRONLY);
-
 $| = 1;
-my $mode = shift // '';
+my $mode = @ARGV ? shift : '';
 $mode =~ /\A--(?:check|expire|guard)\z/ && !@ARGV
     or die "usage: watchdog.pl --check|--expire|--guard\n";
 
@@ -12,7 +8,8 @@ open(my $version, '<', '/proc/sys/kernel/osrelease') or die "kernel: $!\n";
 my $release = <$version>;
 close $version;
 defined($release) && $release eq "3.10.24\n" or die "unexpected kernel\n";
-readlink('/sys/class/watchdog/watchdog0/device/driver') =~ m{/xcode_wdt\z}
+my $driver = readlink('/sys/bus/platform/devices/xcode_wdt/driver');
+defined($driver) && $driver =~ m{/xcode_wdt\z}
     or die "unexpected watchdog driver\n";
 
 my $watchdog;
@@ -23,7 +20,7 @@ END {
     }
 }
 $SIG{TERM} = $SIG{INT} = sub { exit 0 };
-sysopen($watchdog, '/dev/watchdog0', O_WRONLY) or die "watchdog open: $!\n";
+sysopen($watchdog, '/dev/watchdog0', 1) or die "watchdog open: $!\n";
 my $support = "\0" x 40;
 defined(ioctl($watchdog, 0x80285700, $support)) or die "watchdog support: $!\n";
 my ($options, $firmware, $identity) = unpack('VVa32', $support);
