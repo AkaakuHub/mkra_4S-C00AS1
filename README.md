@@ -10,7 +10,6 @@ SHARP 4S-C00AS1をMirakurun互換のネットワークチューナーとして�
 - BS4KのISDB-S3/MMTからMPEG-TSへの変換。
 - BS2K・BS4K共通のMirakurun互換HTTP APIと、同じTSへの接続共有。
 - 番組情報の収集、EPGStation連携、外部サーバーからのRAMへの再投入。
-- 本体のfreeze待機、Magic Packetによる起床、録画後の自動再待機。
 
 物理チューナーは1基です。異なるTSの同時受信はできません。2K/4K切り替えに伴う受信停止の修正は検証中で、長時間運用とHDMI映像復帰は保証しません。本体待機の消費電力は未測定です。詳細は[制限事項](docs/LIMITATIONS.md)を参照してください。
 
