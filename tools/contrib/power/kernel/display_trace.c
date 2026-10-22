@@ -12,14 +12,17 @@ static int enabled;
 static int (*native_down)(void *);
 static int (*native_suspend)(void *);
 static void (*emit_log)(void);
+static struct task_prefix *suspend_task;
 
 static int traced_suspend(void *device)
 {
     int result;
 
+    suspend_task = as1_current();
     printk("\0014as1_display_trace: entering display device suspend\n");
     emit_log();
     result = native_suspend(device);
+    suspend_task = 0;
     printk("\0014as1_display_trace: leaving display device suspend result=%d\n",
            result);
     emit_log();
@@ -29,18 +32,18 @@ static int traced_suspend(void *device)
 static int traced_lock(void *semaphore)
 {
     unsigned long caller = (unsigned long)__builtin_return_address(0);
-    int tracing = caller >= suspend_start && caller < suspend_start + 0x190;
+    int tracing = as1_current() == suspend_task;
     int result;
 
     if (tracing) {
-        printk("\0014as1_display_trace: before lock offset=%lx sem=%p\n",
-               caller - suspend_start, semaphore);
+        printk("\0014as1_display_trace: before lock caller=%lx sem=%p\n",
+               caller, semaphore);
         emit_log();
     }
     result = native_down(semaphore);
     if (tracing) {
-        printk("\0014as1_display_trace: after lock offset=%lx result=%d\n",
-               caller - suspend_start, result);
+        printk("\0014as1_display_trace: after lock caller=%lx result=%d\n",
+               caller, result);
         emit_log();
     }
     return result;
