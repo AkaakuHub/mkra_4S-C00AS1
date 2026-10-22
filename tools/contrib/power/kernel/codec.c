@@ -59,7 +59,7 @@ AS1_PARAM(bypass, 0200, set_bypass, 0);
 
 int init_module(void)
 {
-    unsigned long context = kallsyms_lookup_name("gps_XCode");
+    unsigned long context = kallsyms_lookup_name("gps_xcode_context");
     unsigned int i;
 
     callbacks[0] = (void *)kallsyms_lookup_name("xc_device_suspend");
