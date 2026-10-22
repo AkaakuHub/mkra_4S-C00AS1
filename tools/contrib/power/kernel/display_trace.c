@@ -23,12 +23,18 @@ static void *hdmi_semaphore;
 static struct task_prefix *volatile hdmi_owner;
 static char owner_name[16];
 static unsigned long owner_caller;
+static int quiesce;
+static int hdmi_held;
 
 static int traced_suspend(void *device)
 {
     int result;
 
     suspend_task = as1_current();
+    if (hdmi_held) {
+        hdmi_held = 0;
+        native_up(hdmi_semaphore);
+    }
     printk("\0014as1_display_trace: entering display device suspend\n");
     emit_log();
     result = native_suspend(device);
@@ -55,7 +61,13 @@ static int traced_lock(void *semaphore)
         }
         emit_log();
     }
-    result = native_down(semaphore);
+    for (;;) {
+        result = native_down(semaphore);
+        if (!result || semaphore != hdmi_semaphore ||
+            !system_freezing_cnt || !freezing_slow_path(as1_current()))
+            break;
+        __refrigerator(0);
+    }
     if (!result && semaphore == hdmi_semaphore) {
         get_task_comm(owner_name, as1_current());
         owner_caller = caller;
@@ -114,6 +126,8 @@ static int set_enabled(const char *value, const struct kernel_param *parameter)
         return error;
     if (next != 0 && next != 1)
         return -22;
+    if (!next && quiesce)
+        return -22;
     if (next == enabled)
         return 0;
     error = stop_machine(change_branch, &next, 0);
@@ -128,13 +142,51 @@ static int get_stats(char *buffer, const struct kernel_param *parameter)
 {
     (void)parameter;
     return scnprintf(buffer, 4096,
-                     "enabled=%d hdmi_sem=%p owner=%p name=%s caller=%lx\n",
-                     enabled, hdmi_semaphore, (void *)hdmi_owner,
+                     "enabled=%d quiesce=%d held=%d hdmi_sem=%p owner=%p name=%s caller=%lx\n",
+                     enabled, quiesce, hdmi_held, hdmi_semaphore, (void *)hdmi_owner,
                      owner_name, owner_caller);
 }
 
+static int set_quiesce(const char *value, const struct kernel_param *parameter)
+{
+    int next;
+    int error;
+
+    (void)parameter;
+    error = kstrtoint(value, 0, &next);
+    if (error)
+        return error;
+    if (!enabled || hdmi_held || (next != 0 && next != 1))
+        return -22;
+    quiesce = next;
+    return 0;
+}
+
+static int power_event(struct notifier_block *block, unsigned long event,
+                       void *unused)
+{
+    (void)block;
+    (void)unused;
+    if (event == 3 && quiesce) {
+        int result = native_down(hdmi_semaphore);
+
+        if (result)
+            return 0x8002;
+        hdmi_held = 1;
+        printk("\0016as1_display_trace: HDMI acquired before freezer\n");
+        emit_log();
+    } else if (event == 4 && hdmi_held) {
+        hdmi_held = 0;
+        native_up(hdmi_semaphore);
+    }
+    return 0;
+}
+
+static struct notifier_block notifier = {.call = power_event};
+
 AS1_PARAM(enabled, 0200, set_enabled, 0);
 AS1_PARAM(stats, 0400, 0, get_stats);
+AS1_PARAM(quiesce, 0200, set_quiesce, 0);
 
 int init_module(void)
 {
@@ -207,5 +259,5 @@ int init_module(void)
         return -34;
     traced_unlock_branch = 0xeb000000U | ((delta >> 2) & 0x00ffffffU);
     printk("\0016as1_display_trace: verified display lock branch; disabled\n");
-    return 0;
+    return register_pm_notifier(&notifier);
 }
