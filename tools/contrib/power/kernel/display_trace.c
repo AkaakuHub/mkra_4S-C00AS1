@@ -193,17 +193,19 @@ int init_module(void)
     if ((delta & 3) || delta < -33554432L || delta > 33554428L)
         return -34;
     traced_branch = 0xea000000U | ((delta >> 2) & 0x00ffffffU);
-    unlock_entry = lock_entry + 1;
+    if (lock_entry[1] != 0xe92d4008U)
+        return -22;
+    unlock_entry = lock_entry + 2;
     original_unlock = *unlock_entry;
     target = (unsigned long)unlock_entry + 8 +
              ((long)(original_unlock << 8) >> 6);
-    if ((original_unlock & 0xff000000U) != 0xea000000U ||
+    if ((original_unlock & 0xff000000U) != 0xeb000000U ||
         target != (unsigned long)native_up)
         return -22;
     delta = (unsigned long)traced_unlock - (unsigned long)unlock_entry - 8;
     if ((delta & 3) || delta < -33554432L || delta > 33554428L)
         return -34;
-    traced_unlock_branch = 0xea000000U | ((delta >> 2) & 0x00ffffffU);
+    traced_unlock_branch = 0xeb000000U | ((delta >> 2) & 0x00ffffffU);
     printk("\0016as1_display_trace: verified display lock branch; disabled\n");
     return 0;
 }
