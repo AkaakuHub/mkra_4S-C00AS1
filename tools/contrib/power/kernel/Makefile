@@ -7,7 +7,8 @@ CFLAGS := -Os -Wall -Wextra -Werror -std=gnu11 -ffreestanding -fno-builtin \
     -fno-asynchronous-unwind-tables -marm -march=armv7-a -mfloat-abi=soft
 
 .PHONY: all clean
-all: $(BUILD_DIR)/as1_freezer.ko $(BUILD_DIR)/as1_diag.ko $(BUILD_DIR)/as1_wake.ko
+all: $(BUILD_DIR)/as1_freezer.ko $(BUILD_DIR)/as1_diag.ko $(BUILD_DIR)/as1_wake.ko \
+    $(BUILD_DIR)/as1_display.ko
 
 $(BUILD_DIR):
 	mkdir -p $@
@@ -39,7 +40,17 @@ $(BUILD_DIR)/wake_module.o: module.S | $(BUILD_DIR)
 $(BUILD_DIR)/as1_wake.ko: $(BUILD_DIR)/wake.o $(BUILD_DIR)/wake_module.o
 	$(LD) -r $^ -o $@
 
+$(BUILD_DIR)/display.o: display.c target_abi.h | $(BUILD_DIR)
+	$(CC) $(CFLAGS) -c $< -o $@
+
+$(BUILD_DIR)/display_module.o: module.S | $(BUILD_DIR)
+	$(CC) $(CFLAGS) -DAS1_MODULE_NAME='"as1_display"' -c $< -o $@
+
+$(BUILD_DIR)/as1_display.ko: $(BUILD_DIR)/display.o $(BUILD_DIR)/display_module.o
+	$(LD) -r $^ -o $@
+
 clean:
 	rm -f $(BUILD_DIR)/freezer.o $(BUILD_DIR)/module.o $(BUILD_DIR)/as1_freezer.ko \
 	    $(BUILD_DIR)/diag.o $(BUILD_DIR)/diag_module.o $(BUILD_DIR)/as1_diag.ko \
-	    $(BUILD_DIR)/wake.o $(BUILD_DIR)/wake_module.o $(BUILD_DIR)/as1_wake.ko
+	    $(BUILD_DIR)/wake.o $(BUILD_DIR)/wake_module.o $(BUILD_DIR)/as1_wake.ko \
+	    $(BUILD_DIR)/display.o $(BUILD_DIR)/display_module.o $(BUILD_DIR)/as1_display.ko
