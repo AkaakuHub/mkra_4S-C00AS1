@@ -60,12 +60,17 @@ static int set_armed(const char *value, const struct kernel_param *parameter)
 
 static int get_stats(char *buffer, const struct kernel_param *parameter)
 {
+    u32 watchdog_load = *(volatile u32 *)0xffef643cUL;
+    u32 watchdog_mask = *(volatile u32 *)0xffef6440UL;
+
+    __asm__ volatile("dsb sy" ::: "memory");
     (void)parameter;
     return scnprintf(buffer, 4096,
-                     "ticks=%d logging=%d sequence=%u send=%d log_flags=%08x recovery_flags=%08x\n",
+                     "ticks=%d logging=%d sequence=%u send=%d log_flags=%08x recovery_flags=%08x wdt_load=%08x wdt_mask=%08x\n",
                      ticks, logging, sequence, last_send,
                      log_task ? log_task->flags : 0,
-                     recovery_task ? recovery_task->flags : 0);
+                     recovery_task ? recovery_task->flags : 0,
+                     watchdog_load, watchdog_mask);
 }
 
 static int set_logging(const char *value, const struct kernel_param *parameter)

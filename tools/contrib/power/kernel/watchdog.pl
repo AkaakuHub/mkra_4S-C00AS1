@@ -1,8 +1,10 @@
 #!/usr/bin/perl
 $| = 1;
 my $mode = @ARGV ? shift : '';
+my $seconds = @ARGV ? shift : 25;
 $mode =~ /\A--(?:check|expire|guard)\z/ && !@ARGV
-    or die "usage: watchdog.pl --check|--expire|--guard\n";
+    && $seconds =~ /\A\d+\z/ && $seconds >= 1 && $seconds <= 25
+    or die "usage: watchdog.pl --check|--expire|--guard [1..25]\n";
 
 open(my $version, '<', '/proc/sys/kernel/osrelease') or die "kernel: $!\n";
 my $release = <$version>;
@@ -26,11 +28,11 @@ my ($options, $firmware, $identity) = unpack('VVa32', $support);
 $identity =~ s/\0.*//s;
 $identity eq 'XCODE Watchdog' && $options == 0x8080
     or die "unexpected watchdog: $identity options=$options\n";
-my $timeout = pack('i', 25);
+my $timeout = pack('i', $seconds);
 defined(ioctl($watchdog, 0xc0045706, $timeout)) or die "watchdog timeout: $!\n";
-unpack('i', $timeout) == 25 or die "unexpected watchdog timeout\n";
+unpack('i', $timeout) == $seconds or die "unexpected watchdog timeout\n";
 syswrite($watchdog, "\0") == 1 or die "watchdog keepalive: $!\n";
-print "watchdog=$identity timeout=25 mode=$mode pid=$$\n";
+print "watchdog=$identity timeout=$seconds mode=$mode pid=$$\n";
 
 if ($mode eq '--expire') {
     sleep 60;
