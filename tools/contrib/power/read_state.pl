@@ -36,4 +36,12 @@ for my $offset (0x1c8, 0x1d0, 0x1d4, 0x1f0, 0x200, 0x210, 0x258, 0x278) {
 printf "gePowerStatus=0x%08x\n", read32($mem, 0x0188aa60);
 printf "uiFpmPowLedStat=0x%08x\n", read32($mem, 0x0188abbc);
 printf "eLastPowerStatus=0x%08x\n", read32($mem, 0x0105e92c);
+for my $offset (0, 4, 8, 12, 16, 20, 24, 28) {
+    printf "front_power_time_cache+0x%02x=0x%08x\n", $offset,
+        read32($mem, 0x0188d6fc + $offset);
+}
+for my $offset (0, 4, 8, 12, 16, 20, 24, 28) {
+    printf "front_wake_request_cache+0x%02x=0x%08x\n", $offset,
+        read32($mem, 0x0136875c + $offset);
+}
 close $mem or die "close: $!\n";
