@@ -26,6 +26,12 @@ struct task_prefix {
     volatile u32 flags;
 };
 
+struct notifier_block {
+    int (*call)(struct notifier_block *, unsigned long, void *);
+    struct notifier_block *next;
+    int priority;
+};
+
 extern unsigned long kallsyms_lookup_name(const char *);
 extern void schedule(void);
 extern int system_freezing_cnt;
@@ -41,6 +47,9 @@ extern int kstrtoint(const char *, unsigned int, int *);
 extern int scnprintf(char *, unsigned int, const char *, ...);
 extern int printk(const char *, ...);
 extern int strncmp(const char *, const char *, unsigned int);
+extern void *irq_to_desc(unsigned int);
+extern int register_pm_notifier(struct notifier_block *);
+extern void freeze_wake(void);
 
 #define AS1_PARAM(name, permissions, setter, getter) \
     static const struct kernel_param_ops name##_ops = {setter, getter, 0}; \
