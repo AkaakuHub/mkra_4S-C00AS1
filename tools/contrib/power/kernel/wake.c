@@ -14,6 +14,7 @@ struct irqaction_prefix {
 
 static struct irqaction_prefix *action;
 static int (*native_handler)(int, void *);
+static u32 (*read_register)(void *, u32);
 static unsigned int native_flags;
 static int enabled;
 static volatile int suspending;
@@ -22,11 +23,10 @@ static unsigned int wake_events;
 
 static int wake_irq(int irq, void *device)
 {
-    volatile u32 *dma = *(volatile u32 **)((char *)device + 0x614);
-    u32 status = dma[5];
+    u32 dma = *(u32 *)((char *)device + 0x614);
+    u32 status = read_register((char *)device + 0x610, dma + 0x14);
     int result;
 
-    __asm__ volatile("dsb sy" ::: "memory");
     result = native_handler(irq, device);
     if (status & 0x10000000U) {
         __sync_fetch_and_add(&pmt_events, 1);
@@ -109,10 +109,21 @@ int init_module(void)
         return -22;
     action = *(struct irqaction_prefix **)((char *)descriptor + 0x30);
     native_handler = (void *)kallsyms_lookup_name("synopGMAC_intr_handler");
-    if (!action || !native_handler || action->handler != native_handler ||
+    read_register = (void *)kallsyms_lookup_name("plat_ReadReg");
+    if (!action || !native_handler || !read_register ||
+        action->handler != native_handler ||
         action->irq != 83 || action->flags != 0x80 || !action->device ||
         action->next || action->thread_fn)
         return -22;
+    {
+        unsigned long call = (unsigned long)native_handler + 0x24;
+        u32 instruction = *(u32 *)call;
+        unsigned long target = call + 8 + ((long)(instruction << 8) >> 6);
+
+        if ((instruction & 0xff000000U) != 0xeb000000U ||
+            target != (unsigned long)read_register)
+            return -22;
+    }
     native_flags = action->flags;
     printk("\0016as1_wake: verified IRQ83 native handler=%p ready\n",
            (void *)native_handler);
