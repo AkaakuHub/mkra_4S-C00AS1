@@ -1,7 +1,7 @@
 /* SPDX-License-Identifier: GPL-2.0-only */
 #include "target_abi.h"
 
-extern void *idr_find(void *, int);
+extern void *idr_find_slowpath(void *, int);
 extern int __mmc_claim_host(void *, void *);
 extern void mmc_release_host(void *);
 
@@ -84,7 +84,7 @@ int init_module(void)
         if (i != 4 && i != 5 && removable_ops[i] != fixed_ops[i])
             return -22;
     __rcu_read_lock();
-    host = idr_find(hosts, 0);
+    host = idr_find_slowpath(hosts, 0);
     __rcu_read_unlock();
     if (!host || *(void **)(host + 0x230) != host_ops || !card_matches() ||
         *(u32 **)(host + 0x47c) != removable_ops)
