@@ -17,7 +17,10 @@ pub fn start_idle_task(
     cleanup_failed: Arc<AtomicBool>,
 ) -> io::Result<()> {
     let device = lan::Lan::open()?;
-    for module in ["freezer", "display", "wake", "lan", "front", "mmc"] {
+    if std::fs::read_to_string("/sys/module/as1_freezer/parameters/enabled")?.trim() != "1" {
+        return Err(io::Error::other("as1_freezer is disabled"));
+    }
+    for module in ["display", "wake", "lan", "front", "mmc"] {
         let stats = std::fs::read_to_string(format!(
             "/sys/module/as1_{module}/parameters/stats"
         ))?;
