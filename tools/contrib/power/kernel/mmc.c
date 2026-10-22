@@ -86,7 +86,12 @@ int init_module(void)
     __rcu_read_lock();
     host = idr_find_slowpath(hosts, 0);
     __rcu_read_unlock();
-    if (!host || *(void **)(host + 0x230) != host_ops || !card_matches() ||
+    if (host)
+        printk("\0016as1_mmc: host=%p ops=%p expected=%p caps=%08x card=%p bus_ops=%p\n",
+               host, *(void **)(host + 0x234), host_ops,
+               *(u32 *)(host + 0x26c), *(void **)(host + 0x2d0),
+               *(void **)(host + 0x47c));
+    if (!host || *(void **)(host + 0x234) != host_ops || !card_matches() ||
         *(u32 **)(host + 0x47c) != removable_ops)
         return -22;
     saved_caps = *(u32 *)(host + 0x26c);
