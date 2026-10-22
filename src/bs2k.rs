@@ -122,7 +122,15 @@ impl Source {
                 && r.bank0.iter().any(|&(r, v)| r == 0xcc && v & 0x80 != 0)
                 && r.bank7.iter().any(|&(r, v)| r == 0x72 && v == 0)
             {
-                break;
+                match gr_i2c::make_isdbs_ts_output_exclusive() {
+                    Ok(_) => break,
+                    Err(error) if error.kind() == io::ErrorKind::InvalidData => {
+                        if Instant::now() >= until {
+                            return Err(error);
+                        }
+                    }
+                    Err(error) => return Err(error),
+                }
             }
             if Instant::now() >= until {
                 return Err(err(
@@ -131,7 +139,6 @@ impl Source {
             }
             std::thread::sleep(Duration::from_millis(150));
         }
-        gr_i2c::make_isdbs_ts_output_exclusive()?;
         source.pipeline = source.drv.create_pipeline()?;
         source.av = source.drv.create_av_sync()?;
         source.drv.set_pipeline(source.av, source.pipeline)?;
