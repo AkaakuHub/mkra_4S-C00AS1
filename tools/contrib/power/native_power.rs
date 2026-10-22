@@ -51,19 +51,40 @@ fn download_info() -> io::Result<()> {
     Ok(())
 }
 
+fn display_info() -> io::Result<()> {
+    let receiver = native_transport::receiver()?;
+    let description = console_capture::capture(|| {
+        native_transport::send(&receiver, native_transport::Request::DisplayDescription)
+    })?;
+    if !String::from_utf8_lossy(&description).contains("0: show Layer Info") {
+        return Err(io::Error::other("display diagnostic registration was not verified"));
+    }
+    for request in [
+        native_transport::Request::DisplayLayers,
+        native_transport::Request::DisplayWindows,
+        native_transport::Request::DisplaySurfaces,
+    ] {
+        let captured = console_capture::capture(|| native_transport::send(&receiver, request))?;
+        io::stdout().write_all(&captured)?;
+    }
+    Ok(())
+}
+
 fn main() {
     let args: Vec<_> = std::env::args().skip(1).collect();
     let result = if args == ["--describe"] {
         query()
     } else if args == ["--download-info"] {
         download_info()
+    } else if args == ["--display-info"] {
+        display_info()
     } else if args == ["--save-quick-start"] {
         save_quick_start::run()
     } else if args == ["--restore-console"] {
         console_capture::restore()
     } else {
         Err(io::Error::other(
-            "usage: native_power --describe | --download-info | --save-quick-start | --restore-console",
+            "usage: native_power --describe | --download-info | --display-info | --save-quick-start | --restore-console",
         ))
     };
     if let Err(error) = result {

@@ -92,6 +92,10 @@ pub enum Request {
     SaveQuickStart,
     DownloadDescription,
     DownloadInfo,
+    DisplayDescription,
+    DisplayLayers,
+    DisplayWindows,
+    DisplaySurfaces,
 }
 
 pub fn send(receiver: &Receiver, request: Request) -> io::Result<()> {
@@ -104,8 +108,14 @@ pub fn send(receiver: &Receiver, request: Request) -> io::Result<()> {
         self_ptr: 0,
         inner: 0,
         msg_id: match request {
-            Request::Description | Request::DownloadDescription => 0x80001,
-            Request::SaveQuickStart | Request::DownloadInfo => 0x80000,
+            Request::Description | Request::DownloadDescription | Request::DisplayDescription => {
+                0x80001
+            }
+            Request::SaveQuickStart
+            | Request::DownloadInfo
+            | Request::DisplayLayers
+            | Request::DisplayWindows
+            | Request::DisplaySurfaces => 0x80000,
         },
         len: 56,
         src: 655,
@@ -118,6 +128,18 @@ pub fn send(receiver: &Receiver, request: Request) -> io::Result<()> {
         }
         Request::DownloadDescription | Request::DownloadInfo => {
             wire.payload[4..16].copy_from_slice(b"DlmPrintInfo");
+        }
+        Request::DisplayDescription => {
+            wire.payload[4..11].copy_from_slice(b"dfbinfo");
+        }
+        Request::DisplayLayers => {
+            wire.payload[4..13].copy_from_slice(b"dfbinfo 0");
+        }
+        Request::DisplayWindows => {
+            wire.payload[4..13].copy_from_slice(b"dfbinfo 1");
+        }
+        Request::DisplaySurfaces => {
+            wire.payload[4..13].copy_from_slice(b"dfbinfo 2");
         }
     }
     if unsafe {
