@@ -15,6 +15,7 @@ static volatile int logging = 1;
 static struct task_prefix *owner;
 static unsigned int sequence;
 static int last_send;
+static volatile int sending;
 static struct task_prefix *log_task;
 static struct task_prefix *recovery_task;
 static int (*read_log)(int, char *, int, _Bool);
@@ -82,11 +83,14 @@ static int set_logging(const char *value, const struct kernel_param *parameter)
     return 0;
 }
 
-static void send_log(void)
+void as1_diag_emit(void)
 {
-    int length = read_log(3, log_buffer, sizeof(log_buffer), 1);
+    int length;
     int offset;
 
+    if (!__sync_bool_compare_and_swap(&sending, 0, 1))
+        return;
+    length = read_log(3, log_buffer, sizeof(log_buffer), 1);
     sequence++;
     for (offset = 0; offset < length; offset += 1200) {
         unsigned int part = (unsigned int)(length - offset);
@@ -102,6 +106,7 @@ static void send_log(void)
         message.flags = 0x40;
         last_send = kernel_sendmsg(output, &message, &vector, 1, part);
     }
+    __sync_lock_release(&sending);
 }
 
 static int monitor(void *unused)
@@ -109,7 +114,7 @@ static int monitor(void *unused)
     (void)unused;
     for (;;) {
         if (logging)
-            send_log();
+            as1_diag_emit();
         msleep(250);
     }
     return 0;
