@@ -72,15 +72,27 @@ AS1_PARAM(enabled, 0200, set_enabled, 0);
 
 int init_module(void)
 {
+    unsigned long call;
     unsigned long target;
+    u32 instruction;
     long delta;
 
-    lock_entry = (void *)kallsyms_lookup_name("xcfb_os_mutex_lock");
     suspend_start = kallsyms_lookup_name("xcfb_disp_dev_suspend");
     native_down = (void *)kallsyms_lookup_name("down_interruptible");
     emit_log = (void *)kallsyms_lookup_name("as1_diag_emit");
-    if (!lock_entry || !suspend_start || !native_down || !emit_log)
+    if (!suspend_start || !native_down || !emit_log)
         return -2;
+    call = suspend_start + 0x24;
+    instruction = *(u32 *)call;
+    if ((instruction & 0xff000000U) != 0xeb000000U)
+        return -22;
+    lock_entry = (void *)(call + 8 + ((long)(instruction << 8) >> 6));
+    call = suspend_start + 0x64;
+    instruction = *(u32 *)call;
+    target = call + 8 + ((long)(instruction << 8) >> 6);
+    if ((instruction & 0xff000000U) != 0xeb000000U ||
+        target != (unsigned long)lock_entry)
+        return -22;
     original_branch = *lock_entry;
     target = (unsigned long)lock_entry + 8 +
              ((long)(original_branch << 8) >> 6);
