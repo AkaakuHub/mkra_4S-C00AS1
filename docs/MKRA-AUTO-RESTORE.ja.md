@@ -2,6 +2,8 @@
 
 外部Linuxサーバのsystemd timerから本体の状態を検査し、mkraが消えたときだけ`/tmp/mt/`へ投入する。純正フラッシュ・ブート設定には書かない。
 
+BS2Kには`as1_tuner`が必要です。本体の再起動後は、受信サーバーの起動前に[カーネルモジュール](../tools/contrib/power/kernel/README.md)を別途適用してください。このwatcherのbundleにはモジュールを含めません。
+
 ## ローカルでbundleを作る
 
 ```sh
