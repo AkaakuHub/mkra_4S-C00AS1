@@ -4,6 +4,7 @@
 extern struct task_prefix *kthread_create_on_node(int (*)(void *), void *, int,
                                                 const char *, ...);
 extern void msleep(unsigned int);
+extern int kthread_stop(struct task_prefix *);
 extern void emergency_restart(void);
 extern void __put_task_struct(struct task_prefix *);
 
@@ -15,7 +16,6 @@ static unsigned int sequence;
 static int last_send;
 static int (*read_log)(int, char *, int, _Bool);
 static void (*show_task)(struct task_prefix *);
-static void (*resume_mac)(unsigned int, unsigned int);
 static struct as1_sockaddr_in destination = {
     .family = 2,
     .port = __builtin_bswap16(49001),
@@ -87,6 +87,16 @@ static int monitor(void *unused)
 {
     (void)unused;
     for (;;) {
+        send_log();
+        msleep(250);
+    }
+    return 0;
+}
+
+static int recovery(void *unused)
+{
+    (void)unused;
+    for (;;) {
         int remaining = ticks;
 
         if (remaining > 0 &&
@@ -98,12 +108,9 @@ static int monitor(void *unused)
             if (task)
                 show_task(task);
             release_task(task);
-            resume_mac(0, 1);
-            send_log();
             msleep(500);
             emergency_restart();
         }
-        send_log();
         msleep(250);
     }
     return 0;
@@ -115,22 +122,29 @@ AS1_PARAM(stats, 0400, 0, get_stats);
 int init_module(void)
 {
     struct task_prefix *thread;
+    struct task_prefix *watcher;
     int error;
 
     _Static_assert(sizeof(struct as1_msghdr) == 28, "Linux3.10 ARM32 msghdr");
     read_log = (void *)kallsyms_lookup_name("do_syslog");
     show_task = (void *)kallsyms_lookup_name("sched_show_task");
-    resume_mac = (void *)kallsyms_lookup_name("synopGMAC_pm");
-    if (!read_log || !show_task || !resume_mac)
+    if (!read_log || !show_task)
         return -2;
     error = sock_create_kern(2, 2, 17, &output);
     if (error)
         return error;
+    watcher = kthread_create_on_node(recovery, 0, -1, "as1_pm_recover");
+    if ((unsigned long)watcher >= (unsigned long)-4095) {
+        sock_release(output);
+        return (int)watcher;
+    }
     thread = kthread_create_on_node(monitor, 0, -1, "as1_pm_diag");
     if ((unsigned long)thread >= (unsigned long)-4095) {
+        kthread_stop(watcher);
         sock_release(output);
         return (int)thread;
     }
+    wake_up_process(watcher);
     wake_up_process(thread);
     printk("\0016as1_diag: UDP log output to 192.168.1.20:49001 ready\n");
     return 0;
