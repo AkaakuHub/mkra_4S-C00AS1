@@ -1,10 +1,46 @@
 /* SPDX-License-Identifier: GPL-2.0-only */
 #include "target_abi.h"
 
-static volatile u32 *callbacks[2];
-static u32 saved[2][2];
-static int bypass;
-static const u32 return_success[2] = {0xe3a00000U, 0xe12fff1eU};
+struct branch_patch {
+    volatile u32 *address;
+    u32 original;
+    u32 repaired;
+};
+
+static struct branch_patch patches[2];
+static void *hdmi_semaphore;
+static int (*native_down)(void *);
+static void (*native_up)(void *);
+static int (*native_suspend)(void *);
+static int enabled;
+static int preparing;
+static int held;
+static unsigned int retries;
+static unsigned int suspends;
+
+static int freezable_lock(void *semaphore)
+{
+    int result;
+
+    for (;;) {
+        result = native_down(semaphore);
+        if (!result || semaphore != hdmi_semaphore ||
+            !system_freezing_cnt || !freezing_slow_path(as1_current()))
+            return result;
+        retries++;
+        __refrigerator(0);
+    }
+}
+
+static int suspend_display(void *device)
+{
+    if (held) {
+        held = 0;
+        native_up(hdmi_semaphore);
+    }
+    suspends++;
+    return native_suspend(device);
+}
 
 static void sync_code(void *unused)
 {
@@ -12,28 +48,26 @@ static void sync_code(void *unused)
 
     (void)unused;
     for (i = 0; i < 2; i++)
-        v7_coherent_kern_range((unsigned long)callbacks[i],
-                              (unsigned long)(callbacks[i] + 2));
+        v7_coherent_kern_range((unsigned long)patches[i].address,
+                              (unsigned long)(patches[i].address + 1));
 }
 
-static int change_callbacks(void *value)
+static int change_branches(void *value)
 {
     int next = *(int *)value;
     unsigned int i;
-    unsigned int j;
 
     for (i = 0; i < 2; i++)
-        for (j = 0; j < 2; j++)
-            if (callbacks[i][j] != (bypass ? return_success[j] : saved[i][j]))
-                return -22;
+        if (*patches[i].address !=
+            (enabled ? patches[i].repaired : patches[i].original))
+            return -22;
     for (i = 0; i < 2; i++)
-        for (j = 0; j < 2; j++)
-            callbacks[i][j] = next ? return_success[j] : saved[i][j];
+        *patches[i].address = next ? patches[i].repaired : patches[i].original;
     sync_code(0);
     return 0;
 }
 
-static int set_bypass(const char *value, const struct kernel_param *parameter)
+static int set_enabled(const char *value, const struct kernel_param *parameter)
 {
     int next;
     int error;
@@ -42,40 +76,110 @@ static int set_bypass(const char *value, const struct kernel_param *parameter)
     error = kstrtoint(value, 0, &next);
     if (error)
         return error;
-    if (!callbacks[0] || !callbacks[1] || (next != 0 && next != 1))
+    if (preparing || held || (next != 0 && next != 1))
         return -22;
-    if (next == bypass)
+    if (next == enabled)
         return 0;
-    error = stop_machine(change_callbacks, &next, 0);
+    error = stop_machine(change_branches, &next, 0);
     if (!error) {
         on_each_cpu(sync_code, 0, 1);
-        bypass = next;
-        printk("\0014as1_display: display suspend/resume bypass=%d\n", bypass);
+        enabled = next;
     }
     return error;
 }
 
-static int get_bypass(char *buffer, const struct kernel_param *parameter)
+static int get_stats(char *buffer, const struct kernel_param *parameter)
 {
     (void)parameter;
-    return scnprintf(buffer, 4096, "%d\n", bypass);
+    return scnprintf(buffer, 4096,
+                     "enabled=%d preparing=%d held=%d retries=%u suspends=%u hdmi_sem=%p\n",
+                     enabled, preparing, held, retries, suspends, hdmi_semaphore);
 }
 
-AS1_PARAM(bypass, 0600, set_bypass, get_bypass);
+static int power_event(struct notifier_block *block, unsigned long event,
+                       void *unused)
+{
+    (void)block;
+    (void)unused;
+    if (event == 3 && enabled) {
+        int result;
+
+        preparing = 1;
+        result = native_down(hdmi_semaphore);
+        if (result) {
+            preparing = 0;
+            return 0x8002;
+        }
+        held = 1;
+    } else if (event == 4) {
+        if (held) {
+            held = 0;
+            native_up(hdmi_semaphore);
+        }
+        preparing = 0;
+    }
+    return 0;
+}
+
+static int prepare_branch(struct branch_patch *patch, volatile u32 *address,
+                          u32 opcode, unsigned long target,
+                          unsigned long replacement)
+{
+    u32 instruction = *address;
+    unsigned long destination = (unsigned long)address + 8 +
+                                ((long)(instruction << 8) >> 6);
+    long delta = replacement - (unsigned long)address - 8;
+
+    if ((instruction & 0xff000000U) != opcode || destination != target)
+        return -22;
+    if ((delta & 3) || delta < -33554432L || delta > 33554428L)
+        return -34;
+    patch->address = address;
+    patch->original = instruction;
+    patch->repaired = opcode | ((delta >> 2) & 0x00ffffffU);
+    return 0;
+}
+
+static struct notifier_block notifier = {.call = power_event};
+
+AS1_PARAM(enabled, 0200, set_enabled, 0);
+AS1_PARAM(stats, 0400, 0, get_stats);
 
 int init_module(void)
 {
-    const char *names[2] = {"xcfb_disp_suspend", "xcfb_disp_resume"};
-    unsigned int i;
+    unsigned long callback = kallsyms_lookup_name("xcfb_disp_suspend");
+    unsigned long device_suspend = kallsyms_lookup_name("xcfb_disp_dev_suspend");
+    unsigned long lock;
+    unsigned long call;
+    u32 instruction;
+    u32 *device_slot;
+    int error;
 
-    for (i = 0; i < 2; i++) {
-        callbacks[i] = (volatile u32 *)kallsyms_lookup_name(names[i]);
-        if (!callbacks[i] || callbacks[i][0] != 0xe92d4008U ||
-            callbacks[i][1] != 0xe3a00601U)
-            return -22;
-        saved[i][0] = callbacks[i][0];
-        saved[i][1] = callbacks[i][1];
-    }
-    printk("\0016as1_display: display callbacks verified; bypass disabled\n");
-    return 0;
+    native_down = (void *)kallsyms_lookup_name("down_interruptible");
+    native_up = (void *)kallsyms_lookup_name("up");
+    native_suspend = (void *)device_suspend;
+    if (!callback || !device_suspend || !native_down || !native_up ||
+        *(u32 *)(callback + 0x14) != 0xe59f3040U)
+        return -22;
+    device_slot = *(u32 **)(callback + 0x5c);
+    if (!device_slot || !*device_slot)
+        return -22;
+    hdmi_semaphore = *(void **)(*device_slot + 0x4a884);
+    if (!hdmi_semaphore)
+        return -22;
+    call = device_suspend + 0x24;
+    instruction = *(u32 *)call;
+    if ((instruction & 0xff000000U) != 0xeb000000U)
+        return -22;
+    lock = call + 8 + ((long)(instruction << 8) >> 6);
+    error = prepare_branch(&patches[0], (void *)lock, 0xea000000U,
+                           (unsigned long)native_down, (unsigned long)freezable_lock);
+    if (error)
+        return error;
+    error = prepare_branch(&patches[1], (void *)(callback + 0x1c), 0xeb000000U,
+                           device_suspend, (unsigned long)suspend_display);
+    if (error)
+        return error;
+    printk("\0016as1_display: verified native HDMI lock handoff; disabled\n");
+    return register_pm_notifier(&notifier);
 }

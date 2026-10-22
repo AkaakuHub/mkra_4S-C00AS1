@@ -16,7 +16,7 @@ def main() -> None:
     parser.add_argument('--codec-bypass', action='store_true')
     parser.add_argument('--diagnostics', action='store_true')
     args = parser.parse_args()
-    names = ['freezer', 'display', 'wake', 'lan', 'front']
+    names = ['freezer', 'display', 'wake', 'lan', 'front', 'mmc']
     if args.codec_bypass:
         names.append('codec')
     if args.diagnostics:
@@ -66,7 +66,8 @@ def main() -> None:
             'if test "$w" = sleep_current_thread_on_interrupt; then '
             'echo "${d##*/}" > /sys/module/as1_freezer/parameters/wake_tid; fi; done',
             'echo N > /sys/module/printk/parameters/console_suspend',
-            'echo 1 > /sys/module/as1_display/parameters/bypass',
+            'echo 1 > /sys/module/as1_mmc/parameters/enabled',
+            'echo 1 > /sys/module/as1_display/parameters/enabled',
         ]
         if args.codec_bypass:
             commands.append('echo 1 > /sys/module/as1_codec/parameters/bypass')
@@ -86,6 +87,8 @@ def main() -> None:
             'cat /sys/module/as1_freezer/parameters/stats '
             '/sys/module/as1_front/parameters/stats '
             '/sys/module/as1_wake/parameters/stats '
+            '/sys/module/as1_display/parameters/stats '
+            '/sys/module/as1_mmc/parameters/stats '
             '/sys/module/as1_lan/parameters/stats',
         ))
     finally:
