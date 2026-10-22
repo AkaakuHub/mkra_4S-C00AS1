@@ -5,7 +5,6 @@ extern struct task_prefix *kthread_create_on_node(int (*)(void *), void *, int,
                                                 const char *, ...);
 extern void msleep(unsigned int);
 extern int kthread_stop(struct task_prefix *);
-extern void emergency_restart(void);
 extern void __put_task_struct(struct task_prefix *);
 
 static struct socket *output;
@@ -20,6 +19,8 @@ static struct task_prefix *log_task;
 static struct task_prefix *recovery_task;
 static int (*read_log)(int, char *, int, _Bool);
 static void (*show_task)(struct task_prefix *);
+static int (*front_ready)(void);
+static int (*stop_heartbeat)(void);
 static struct as1_sockaddr_in destination = {
     .family = 2,
     .port = __builtin_bswap16(49001),
@@ -44,6 +45,8 @@ static int set_armed(const char *value, const struct kernel_param *parameter)
     if (error)
         return error;
     if (seconds < 0 || seconds > 60)
+        return -22;
+    if (seconds && !front_ready())
         return -22;
     if (seconds) {
         task = as1_current();
@@ -142,13 +145,13 @@ static int recovery(void *unused)
                 freeze_wake();
             } else if (remaining == 1) {
                 struct task_prefix *task = __sync_lock_test_and_set(&owner, 0);
+                int result = stop_heartbeat();
 
-                printk("\0013as1_diag: deadline reached; suspend caller follows\n");
+                printk("\0013as1_diag: deadline reached; MCU failstop=%d; suspend caller follows\n",
+                       result);
                 if (task)
                     show_task(task);
                 release_task(task);
-                msleep(500);
-                emergency_restart();
             }
         }
         msleep(250);
@@ -169,7 +172,9 @@ int init_module(void)
     _Static_assert(sizeof(struct as1_msghdr) == 28, "Linux3.10 ARM32 msghdr");
     read_log = (void *)kallsyms_lookup_name("do_syslog");
     show_task = (void *)kallsyms_lookup_name("sched_show_task");
-    if (!read_log || !show_task)
+    front_ready = (void *)kallsyms_lookup_name("as1_front_ready");
+    stop_heartbeat = (void *)kallsyms_lookup_name("as1_front_failstop");
+    if (!read_log || !show_task || !front_ready || !stop_heartbeat)
         return -2;
     error = sock_create_kern(2, 2, 17, &output);
     if (error)

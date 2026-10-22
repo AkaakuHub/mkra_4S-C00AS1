@@ -3,6 +3,7 @@
 
 extern void get_task_comm(char *, struct task_prefix *);
 extern void __put_task_struct(struct task_prefix *);
+extern int send_sig(int, struct task_prefix *, int);
 
 static struct task_prefix *tasks[2];
 static unsigned int saved_flags[2];
@@ -10,6 +11,18 @@ static u32 *uart_action;
 static u32 uart_flags;
 static struct task_prefix *(*find_task)(int);
 static int active;
+
+int as1_front_ready(void)
+{
+    return tasks[0] && tasks[1];
+}
+
+int as1_front_failstop(void)
+{
+    if (!tasks[1])
+        return -3;
+    return send_sig(19, tasks[1], 1);
+}
 
 static int change_tasks(void *value)
 {
