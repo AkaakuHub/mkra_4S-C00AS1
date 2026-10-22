@@ -5,6 +5,7 @@ extern struct task_prefix *kthread_create_on_node(int (*)(void *), void *, int,
                                                 const char *, ...);
 extern void msleep(unsigned int);
 extern int kthread_stop(struct task_prefix *);
+extern void kthread_bind(struct task_prefix *, unsigned int);
 extern void emergency_restart(void);
 extern void __put_task_struct(struct task_prefix *);
 
@@ -14,6 +15,9 @@ static volatile int ticks;
 static struct task_prefix *owner;
 static unsigned int sequence;
 static int last_send;
+static struct task_prefix *log_task;
+static struct task_prefix *recovery_task;
+static void (*busy_us)(unsigned long);
 static int (*read_log)(int, char *, int, _Bool);
 static void (*show_task)(struct task_prefix *);
 static struct as1_sockaddr_in destination = {
@@ -57,8 +61,11 @@ static int set_armed(const char *value, const struct kernel_param *parameter)
 static int get_stats(char *buffer, const struct kernel_param *parameter)
 {
     (void)parameter;
-    return scnprintf(buffer, 4096, "ticks=%d sequence=%u send=%d\n",
-                     ticks, sequence, last_send);
+    return scnprintf(buffer, 4096,
+                     "ticks=%d sequence=%u send=%d log_flags=%08x recovery_flags=%08x\n",
+                     ticks, sequence, last_send,
+                     log_task ? log_task->flags : 0,
+                     recovery_task ? recovery_task->flags : 0);
 }
 
 static void send_log(void)
@@ -119,7 +126,14 @@ static int recovery(void *unused)
                 emergency_restart();
             }
         }
-        msleep(250);
+        if (ticks > 0) {
+            unsigned int i;
+
+            for (i = 0; i < 250; i++)
+                busy_us(1000);
+        } else {
+            msleep(250);
+        }
     }
     return 0;
 }
@@ -136,7 +150,8 @@ int init_module(void)
     _Static_assert(sizeof(struct as1_msghdr) == 28, "Linux3.10 ARM32 msghdr");
     read_log = (void *)kallsyms_lookup_name("do_syslog");
     show_task = (void *)kallsyms_lookup_name("sched_show_task");
-    if (!read_log || !show_task)
+    busy_us = (void *)kallsyms_lookup_name("__loop_udelay");
+    if (!read_log || !show_task || !busy_us)
         return -2;
     error = sock_create_kern(2, 2, 17, &output);
     if (error)
@@ -152,6 +167,9 @@ int init_module(void)
         sock_release(output);
         return (int)thread;
     }
+    kthread_bind(watcher, 1);
+    recovery_task = watcher;
+    log_task = thread;
     wake_up_process(watcher);
     wake_up_process(thread);
     printk("\0016as1_diag: UDP log output to 192.168.1.20:49001 ready\n");
