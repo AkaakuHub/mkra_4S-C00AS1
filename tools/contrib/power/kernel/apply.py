@@ -6,11 +6,11 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
 
-from sharp_telnet import connect
+from sharp_telnet import SharpTelnet, connect
 
 
-def apply_modules(session, module_dir: Path, *, codec_bypass: bool, diagnostics: bool) -> None:
-    names = ['freezer', 'display', 'wake', 'lan', 'front', 'mmc']
+def apply_modules(session: SharpTelnet, module_dir: Path, *, codec_bypass: bool, diagnostics: bool) -> None:
+    names = ['freezer', 'display', 'wake', 'lan', 'front', 'mmc', 'guard']
     if codec_bypass:
         names.append('codec')
     if diagnostics:
@@ -69,6 +69,7 @@ def apply_modules(session, module_dir: Path, *, codec_bypass: bool, diagnostics:
         'echo 1 > /sys/module/as1_front/parameters/enabled',
         'echo 1 > /sys/module/as1_wake/parameters/enabled',
         'echo 1 > /sys/module/as1_lan/parameters/enabled',
+        'echo 1 > /sys/module/as1_guard/parameters/enabled',
         'echo none > /sys/power/pm_test',
     ])
     for command in commands:
@@ -81,7 +82,8 @@ def apply_modules(session, module_dir: Path, *, codec_bypass: bool, diagnostics:
         '/sys/module/as1_wake/parameters/stats '
         '/sys/module/as1_display/parameters/stats '
         '/sys/module/as1_mmc/parameters/stats '
-        '/sys/module/as1_lan/parameters/stats',
+        '/sys/module/as1_lan/parameters/stats '
+        '/sys/module/as1_guard/parameters/stats',
     ))
 
 
