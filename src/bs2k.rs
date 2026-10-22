@@ -1,5 +1,6 @@
 //! Owned live ISDB-S graph. The shared Broker serializes this with BS4K.
 mod capture;
+mod lease;
 
 use capture::Capture;
 use crate::{
@@ -45,6 +46,7 @@ fn identity() -> io::Result<()> {
 /// tuner:aDevOfPath[1] is the FEM's real path1 assignment, not cached SI.
 pub fn legacy_frontend() -> io::Result<bool> {
     identity()?;
+    lease::reset()?;
     let pid = snapshot::procmem::find_pid("tuner")?;
     snapshot::procmem::verify_layout(pid)?;
     let bytes = snapshot::procmem::read(pid, tuner::A_DEV_OF_PATH_ADDR + 4, 4)?;
@@ -71,6 +73,7 @@ pub struct Source {
     decode_max_us: u128,
     dirty: Arc<AtomicBool>,
     label: String,
+    _lease: lease::Lease,
 }
 impl Source {
     pub fn open(
@@ -86,6 +89,7 @@ impl Source {
             ));
         }
         identity()?;
+        let lease = lease::Lease::acquire(Arc::clone(&dirty))?;
         let card = NativeCard::open()?;
         let (system, iv) = card.parameters()?;
         crate::fw_state::ensure_p4_idle(&drv)?;
@@ -106,6 +110,7 @@ impl Source {
             decode_max_us: 0,
             dirty,
             label: format!("ISDB-S RF {freq} TSID {tsid:04X} / native CAS + MULTI2"),
+            _lease: lease,
         };
         let req = tuner::FedTuneRequest::isdb_s(1, tsid, freq)
             .ok_or_else(|| err("invalid ISDB-S path"))?;

@@ -10,7 +10,7 @@ from sharp_telnet import SharpTelnet, connect
 
 
 def apply_modules(session: SharpTelnet, module_dir: Path, *, codec_bypass: bool, diagnostics: bool) -> None:
-    names = ['freezer', 'display', 'wake', 'lan', 'front', 'mmc', 'guard']
+    names = ['freezer', 'display', 'wake', 'lan', 'front', 'mmc', 'guard', 'tuner']
     if codec_bypass:
         names.append('codec')
     if diagnostics:
@@ -35,14 +35,28 @@ def apply_modules(session: SharpTelnet, module_dir: Path, *, codec_bypass: bool,
         raw=True,
     )
     front: dict[str, str] = {}
+    ui_count = 0
     for line in threads.splitlines():
         path, _, name = line.partition(' ')
+        if name == 'abs.T_UIM':
+            ui_count += 1
         if name in ('abs.T_FPD', 'abs.T_FPD3'):
             if name in front or not re.fullmatch(r'/proc/\d+/task/\d+', path):
                 raise RuntimeError('Unexpected front-controller tasks')
             front[name] = path.rsplit('/', 1)[1]
     if len(front) != 2:
         raise RuntimeError('Both native front-controller tasks are required')
+    if ui_count != 1:
+        raise RuntimeError('Expected one native UI task')
+    queues = session.run('cat /tmp/bdh_out_msgh.lst')
+    communication = re.findall(r'^879-(\d+)\s', queues, re.MULTILINE)
+    if len(communication) != 1:
+        raise RuntimeError('Expected one ADSB communication queue')
+    queue = int(communication[0])
+    live_queues = session.run('cat /proc/sysvipc/msg')
+    if not any(len(fields := line.split()) > 1 and fields[1] == str(queue)
+               for line in live_queues.splitlines()[1:]):
+        raise RuntimeError('ADSB communication queue is absent')
 
     for name in names:
         remote = f'/tmp/mt/as1_{name}.ko'
@@ -70,6 +84,8 @@ def apply_modules(session: SharpTelnet, module_dir: Path, *, codec_bypass: bool,
         'echo 1 > /sys/module/as1_wake/parameters/enabled',
         'echo 1 > /sys/module/as1_lan/parameters/enabled',
         'echo 1 > /sys/module/as1_guard/parameters/enabled',
+        f'echo {queue} > /sys/module/as1_tuner/parameters/queue',
+        'echo 1 > /sys/module/as1_tuner/parameters/enabled',
         'echo none > /sys/power/pm_test',
     ])
     for command in commands:
@@ -83,7 +99,8 @@ def apply_modules(session: SharpTelnet, module_dir: Path, *, codec_bypass: bool,
         '/sys/module/as1_display/parameters/stats '
         '/sys/module/as1_mmc/parameters/stats '
         '/sys/module/as1_lan/parameters/stats '
-        '/sys/module/as1_guard/parameters/stats',
+        '/sys/module/as1_guard/parameters/stats '
+        '/sys/module/as1_tuner/parameters/stats',
     ))
 
 

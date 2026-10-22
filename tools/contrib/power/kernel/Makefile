@@ -10,7 +10,7 @@ CFLAGS := -Os -Wall -Wextra -Werror -std=gnu11 -ffreestanding -fno-builtin \
 all: $(BUILD_DIR)/as1_freezer.ko $(BUILD_DIR)/as1_diag.ko $(BUILD_DIR)/as1_wake.ko \
     $(BUILD_DIR)/as1_display.ko $(BUILD_DIR)/as1_lan.ko $(BUILD_DIR)/as1_front.ko \
     $(BUILD_DIR)/as1_codec.ko $(BUILD_DIR)/as1_display_trace.ko $(BUILD_DIR)/as1_mmc.ko \
-    $(BUILD_DIR)/as1_guard.ko
+    $(BUILD_DIR)/as1_guard.ko $(BUILD_DIR)/as1_tuner.ko
 
 $(BUILD_DIR):
 	mkdir -p $@
@@ -105,6 +105,15 @@ $(BUILD_DIR)/guard_module.o: module.S | $(BUILD_DIR)
 $(BUILD_DIR)/as1_guard.ko: $(BUILD_DIR)/guard.o $(BUILD_DIR)/guard_module.o
 	$(LD) -r $^ -o $@
 
+$(BUILD_DIR)/tuner.o: tuner.c target_abi.h | $(BUILD_DIR)
+	$(CC) $(CFLAGS) -c $< -o $@
+
+$(BUILD_DIR)/tuner_module.o: module.S | $(BUILD_DIR)
+	$(CC) $(CFLAGS) -DAS1_MODULE_NAME='"as1_tuner"' -c $< -o $@
+
+$(BUILD_DIR)/as1_tuner.ko: $(BUILD_DIR)/tuner.o $(BUILD_DIR)/tuner_module.o
+	$(LD) -r $^ -o $@
+
 clean:
 	rm -f $(BUILD_DIR)/freezer.o $(BUILD_DIR)/module.o $(BUILD_DIR)/as1_freezer.ko \
 	    $(BUILD_DIR)/diag.o $(BUILD_DIR)/diag_module.o $(BUILD_DIR)/as1_diag.ko \
@@ -115,4 +124,5 @@ clean:
 	    $(BUILD_DIR)/codec.o $(BUILD_DIR)/codec_module.o $(BUILD_DIR)/as1_codec.ko \
 	    $(BUILD_DIR)/display_trace.o $(BUILD_DIR)/display_trace_module.o $(BUILD_DIR)/as1_display_trace.ko \
 	    $(BUILD_DIR)/mmc.o $(BUILD_DIR)/mmc_module.o $(BUILD_DIR)/as1_mmc.ko \
-	    $(BUILD_DIR)/guard.o $(BUILD_DIR)/guard_module.o $(BUILD_DIR)/as1_guard.ko
+	    $(BUILD_DIR)/guard.o $(BUILD_DIR)/guard_module.o $(BUILD_DIR)/as1_guard.ko \
+	    $(BUILD_DIR)/tuner.o $(BUILD_DIR)/tuner_module.o $(BUILD_DIR)/as1_tuner.ko

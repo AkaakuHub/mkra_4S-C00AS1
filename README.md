@@ -32,7 +32,7 @@ rustup target add armv7-unknown-linux-musleabihf
 ./tools/build_unified.sh
 ```
 
-生成した`target/armv7-unknown-linux-musleabihf/release/mkra`を本体の`/tmp/mt/mkra`へ転送し、実行権限を付けます。録画中の入れ替えや既存サーバーとの二重起動を避けてください。
+生成した`target/armv7-unknown-linux-musleabihf/release/mkra`を本体の`/tmp/mt/mkra`へ転送し、実行権限を付けます。BS2Kの使用には[カーネルモジュール](tools/contrib/power/kernel/README.md)の適用が必要です。録画中の入れ替えや既存サーバーとの二重起動を避けてください。
 
 ```sh
 /tmp/mt/mkra serve --remux4k --tune --bs2k --channel-type BS4K --port 40772
