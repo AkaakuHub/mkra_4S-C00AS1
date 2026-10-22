@@ -15,7 +15,6 @@ defined($driver) && $driver =~ m{/xcode_wdt\z}
 my $watchdog;
 END {
     if ($watchdog && defined(fileno($watchdog))) {
-        syswrite($watchdog, 'V') == 1 or warn "watchdog disarm write: $!\n";
         close $watchdog or warn "watchdog close: $!\n";
     }
 }
@@ -25,7 +24,7 @@ my $support = "\0" x 40;
 defined(ioctl($watchdog, 0x80285700, $support)) or die "watchdog support: $!\n";
 my ($options, $firmware, $identity) = unpack('VVa32', $support);
 $identity =~ s/\0.*//s;
-$identity =~ /XCODE/i && ($options & 0x180) == 0x180
+$identity eq 'XCODE Watchdog' && $options == 0x8080
     or die "unexpected watchdog: $identity options=$options\n";
 my $timeout = pack('i', 25);
 defined(ioctl($watchdog, 0xc0045706, $timeout)) or die "watchdog timeout: $!\n";
