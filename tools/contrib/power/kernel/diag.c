@@ -12,6 +12,7 @@ extern void __put_task_struct(struct task_prefix *);
 static struct socket *output;
 static char log_buffer[16384];
 static volatile int ticks;
+static volatile int logging = 1;
 static struct task_prefix *owner;
 static unsigned int sequence;
 static int last_send;
@@ -62,10 +63,25 @@ static int get_stats(char *buffer, const struct kernel_param *parameter)
 {
     (void)parameter;
     return scnprintf(buffer, 4096,
-                     "ticks=%d sequence=%u send=%d log_flags=%08x recovery_flags=%08x\n",
-                     ticks, sequence, last_send,
+                     "ticks=%d logging=%d sequence=%u send=%d log_flags=%08x recovery_flags=%08x\n",
+                     ticks, logging, sequence, last_send,
                      log_task ? log_task->flags : 0,
                      recovery_task ? recovery_task->flags : 0);
+}
+
+static int set_logging(const char *value, const struct kernel_param *parameter)
+{
+    int next;
+    int error;
+
+    (void)parameter;
+    error = kstrtoint(value, 0, &next);
+    if (error)
+        return error;
+    if (next != 0 && next != 1)
+        return -22;
+    logging = next;
+    return 0;
 }
 
 static void send_log(void)
@@ -94,7 +110,8 @@ static int monitor(void *unused)
 {
     (void)unused;
     for (;;) {
-        send_log();
+        if (logging)
+            send_log();
         msleep(250);
     }
     return 0;
@@ -140,6 +157,7 @@ static int recovery(void *unused)
 
 AS1_PARAM(armed, 0200, set_armed, 0);
 AS1_PARAM(stats, 0400, 0, get_stats);
+AS1_PARAM(logging, 0200, set_logging, 0);
 
 int init_module(void)
 {
