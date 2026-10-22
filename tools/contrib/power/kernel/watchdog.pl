@@ -40,7 +40,7 @@ if ($mode eq '--expire') {
 }
 if ($mode eq '--guard') {
     while (1) {
-        sleep 5;
+        select(undef, undef, undef, $seconds / 3);
         syswrite($watchdog, "\0") == 1 or die "watchdog keepalive: $!\n";
     }
 }
