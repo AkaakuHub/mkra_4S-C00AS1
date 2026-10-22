@@ -5,7 +5,6 @@ extern struct task_prefix *kthread_create_on_node(int (*)(void *), void *, int,
                                                 const char *, ...);
 extern void msleep(unsigned int);
 extern int kthread_stop(struct task_prefix *);
-extern void kthread_bind(struct task_prefix *, unsigned int);
 extern void emergency_restart(void);
 extern void __put_task_struct(struct task_prefix *);
 
@@ -18,7 +17,6 @@ static unsigned int sequence;
 static int last_send;
 static struct task_prefix *log_task;
 static struct task_prefix *recovery_task;
-static void (*busy_us)(unsigned long);
 static int (*read_log)(int, char *, int, _Bool);
 static void (*show_task)(struct task_prefix *);
 static struct as1_sockaddr_in destination = {
@@ -143,14 +141,7 @@ static int recovery(void *unused)
                 emergency_restart();
             }
         }
-        if (ticks > 0) {
-            unsigned int i;
-
-            for (i = 0; i < 250; i++)
-                busy_us(1000);
-        } else {
-            msleep(250);
-        }
+        msleep(250);
     }
     return 0;
 }
@@ -168,8 +159,7 @@ int init_module(void)
     _Static_assert(sizeof(struct as1_msghdr) == 28, "Linux3.10 ARM32 msghdr");
     read_log = (void *)kallsyms_lookup_name("do_syslog");
     show_task = (void *)kallsyms_lookup_name("sched_show_task");
-    busy_us = (void *)kallsyms_lookup_name("__loop_udelay");
-    if (!read_log || !show_task || !busy_us)
+    if (!read_log || !show_task)
         return -2;
     error = sock_create_kern(2, 2, 17, &output);
     if (error)
@@ -185,7 +175,6 @@ int init_module(void)
         sock_release(output);
         return (int)thread;
     }
-    kthread_bind(watcher, 1);
     recovery_task = watcher;
     log_task = thread;
     wake_up_process(watcher);
