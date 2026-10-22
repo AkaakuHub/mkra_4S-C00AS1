@@ -10,7 +10,7 @@ static unsigned long suspend_start;
 static u32 original_branch;
 static u32 traced_branch;
 static u32 original_unlock;
-static u32 traced_unlock;
+static u32 traced_unlock_branch;
 static u32 original_call;
 static u32 traced_call;
 static int enabled;
@@ -93,11 +93,11 @@ static int change_branch(void *value)
     int next = *(int *)value;
 
     if (*lock_entry != (enabled ? traced_branch : original_branch) ||
-        *unlock_entry != (enabled ? traced_unlock : original_unlock) ||
+        *unlock_entry != (enabled ? traced_unlock_branch : original_unlock) ||
         *suspend_call != (enabled ? traced_call : original_call))
         return -22;
     *lock_entry = next ? traced_branch : original_branch;
-    *unlock_entry = next ? traced_unlock : original_unlock;
+    *unlock_entry = next ? traced_unlock_branch : original_unlock;
     *suspend_call = next ? traced_call : original_call;
     sync_code(0);
     return 0;
@@ -203,7 +203,7 @@ int init_module(void)
     delta = (unsigned long)traced_unlock - (unsigned long)unlock_entry - 8;
     if ((delta & 3) || delta < -33554432L || delta > 33554428L)
         return -34;
-    traced_unlock = 0xea000000U | ((delta >> 2) & 0x00ffffffU);
+    traced_unlock_branch = 0xea000000U | ((delta >> 2) & 0x00ffffffU);
     printk("\0016as1_display_trace: verified display lock branch; disabled\n");
     return 0;
 }
